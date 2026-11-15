@@ -15,6 +15,7 @@ from phishguard.link_manager import get_tracking_link
 from phishguard.reporting import export_campaign_report
 from phishguard.qr_generator import generate_qr_code
 from phishguard.auth import verify_api_key
+from phishguard.audit import write_audit_log, AUDIT_FILE
 
 
 @asynccontextmanager
@@ -63,21 +64,17 @@ def health():
     }
 
 
-@app.post(
-    "/api/campaigns",
-    dependencies=[Depends(verify_api_key)],
-)
+@app.post("/api/campaigns", dependencies=[Depends(verify_api_key)])
 def new_campaign(request: CampaignRequest):
     try:
-        return create_campaign(request.name)
+        result = create_campaign(request.name)
+        write_audit_log("campaign_created", {"campaign_name": request.name})
+        return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.get(
-    "/api/campaigns",
-    dependencies=[Depends(verify_api_key)],
-)
+@app.get("/api/campaigns", dependencies=[Depends(verify_api_key)])
 def campaigns():
     return {"campaigns": list_campaigns()}
 
@@ -86,12 +83,14 @@ def campaigns():
     "/api/campaigns/{campaign_id}/status",
     dependencies=[Depends(verify_api_key)],
 )
-def change_campaign_status(
-    campaign_id: int,
-    request: StatusRequest,
-):
+def change_campaign_status(campaign_id: int, request: StatusRequest):
     try:
-        return update_campaign_status(campaign_id, request.status)
+        result = update_campaign_status(campaign_id, request.status)
+        write_audit_log(
+            "campaign_status_changed",
+            {"campaign_id": campaign_id, "status": request.status},
+        )
+        return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
@@ -107,10 +106,7 @@ def campaign_analytics(campaign_id: int):
         raise HTTPException(status_code=404, detail=str(error))
 
 
-@app.post(
-    "/api/events",
-    dependencies=[Depends(verify_api_key)],
-)
+@app.post("/api/events", dependencies=[Depends(verify_api_key)])
 def new_event(request: EventRequest):
     try:
         return record_event(
@@ -128,21 +124,21 @@ def new_event(request: EventRequest):
 )
 def security_validation(request: InputRequest):
     try:
-        return validate_input(request.value)
+        result = validate_input(request.value)
+        write_audit_log("security_validation", {"result": "completed"})
+        return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.post(
-    "/api/tracking-link",
-    dependencies=[Depends(verify_api_key)],
-)
+@app.post("/api/tracking-link", dependencies=[Depends(verify_api_key)])
 def create_tracking_link(request: LinkRequest):
     try:
         link = get_tracking_link(
             request.base_url,
             request.tracking_code,
         )
+        write_audit_log("tracking_link_created", {"status": "success"})
         return {"tracking_link": link}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -168,7 +164,29 @@ def campaign_qr(campaign_id: int):
         analytics = get_campaign_analytics(campaign_id)
         return {
             "campaign_id": analytics["campaign"]["id"],
-            "message": "Campaign exists. An authorized training URL is required for QR generation.",
+            "message": "An authorized training URL is required for QR generation.",
         }
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.get("/api/audit-logs", dependencies=[Depends(verify_api_key)])
+def get_audit_logs(limit: int = 100):
+    if limit < 1 or limit > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="Limit must be between 1 and 500.",
+        )
+
+    if not AUDIT_FILE.exists():
+        return {"logs": []}
+
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
+        logs = [line for line in lines[-limit:] if line.strip()]
+        return {"logs": logs}
+    except OSError:
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to read audit logs.",
+        )
