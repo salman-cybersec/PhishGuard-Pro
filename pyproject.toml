@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phishguard-pro"
+version = "0.1.0"
+description = "Advanced phishing awareness simulation and authorized security testing toolkit."
+authors = [
+    {name = "Salman Afzal"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "rich>=13.9.0",
+    "jinja2>=3.1.4",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.9.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "httpx>=0.27.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
