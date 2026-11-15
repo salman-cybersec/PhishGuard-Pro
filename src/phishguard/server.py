@@ -1,6 +1,7 @@
+
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from phishguard.config import APP_NAME, APP_VERSION
@@ -13,6 +14,7 @@ from phishguard.security import validate_input
 from phishguard.link_manager import get_tracking_link
 from phishguard.reporting import export_campaign_report
 from phishguard.qr_generator import generate_qr_code
+from phishguard.auth import verify_api_key
 
 
 @asynccontextmanager
@@ -61,7 +63,10 @@ def health():
     }
 
 
-@app.post("/api/campaigns")
+@app.post(
+    "/api/campaigns",
+    dependencies=[Depends(verify_api_key)],
+)
 def new_campaign(request: CampaignRequest):
     try:
         return create_campaign(request.name)
@@ -69,26 +74,32 @@ def new_campaign(request: CampaignRequest):
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.get("/api/campaigns")
+@app.get(
+    "/api/campaigns",
+    dependencies=[Depends(verify_api_key)],
+)
 def campaigns():
     return {"campaigns": list_campaigns()}
 
 
-@app.patch("/api/campaigns/{campaign_id}/status")
+@app.patch(
+    "/api/campaigns/{campaign_id}/status",
+    dependencies=[Depends(verify_api_key)],
+)
 def change_campaign_status(
     campaign_id: int,
     request: StatusRequest,
 ):
     try:
-        return update_campaign_status(
-            campaign_id,
-            request.status,
-        )
+        return update_campaign_status(campaign_id, request.status)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.get("/api/campaigns/{campaign_id}/analytics")
+@app.get(
+    "/api/campaigns/{campaign_id}/analytics",
+    dependencies=[Depends(verify_api_key)],
+)
 def campaign_analytics(campaign_id: int):
     try:
         return get_campaign_analytics(campaign_id)
@@ -96,7 +107,10 @@ def campaign_analytics(campaign_id: int):
         raise HTTPException(status_code=404, detail=str(error))
 
 
-@app.post("/api/events")
+@app.post(
+    "/api/events",
+    dependencies=[Depends(verify_api_key)],
+)
 def new_event(request: EventRequest):
     try:
         return record_event(
@@ -108,7 +122,10 @@ def new_event(request: EventRequest):
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.post("/api/security/validate")
+@app.post(
+    "/api/security/validate",
+    dependencies=[Depends(verify_api_key)],
+)
 def security_validation(request: InputRequest):
     try:
         return validate_input(request.value)
@@ -116,7 +133,10 @@ def security_validation(request: InputRequest):
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.post("/api/tracking-link")
+@app.post(
+    "/api/tracking-link",
+    dependencies=[Depends(verify_api_key)],
+)
 def create_tracking_link(request: LinkRequest):
     try:
         link = get_tracking_link(
@@ -128,7 +148,10 @@ def create_tracking_link(request: LinkRequest):
         raise HTTPException(status_code=400, detail=str(error))
 
 
-@app.post("/api/campaigns/{campaign_id}/report")
+@app.post(
+    "/api/campaigns/{campaign_id}/report",
+    dependencies=[Depends(verify_api_key)],
+)
 def campaign_report(campaign_id: int):
     try:
         return export_campaign_report(campaign_id)
@@ -136,15 +159,16 @@ def campaign_report(campaign_id: int):
         raise HTTPException(status_code=404, detail=str(error))
 
 
-@app.post("/api/campaigns/{campaign_id}/qr")
+@app.post(
+    "/api/campaigns/{campaign_id}/qr",
+    dependencies=[Depends(verify_api_key)],
+)
 def campaign_qr(campaign_id: int):
     try:
         analytics = get_campaign_analytics(campaign_id)
-        code = analytics["campaign"]["id"]
-
         return {
-            "campaign_id": code,
-            "message": "Campaign exists. Supply its authorized training URL to the QR generator.",
+            "campaign_id": analytics["campaign"]["id"],
+            "message": "Campaign exists. An authorized training URL is required for QR generation.",
         }
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
