@@ -13,10 +13,10 @@ from phishguard.tracking import record_event
 from phishguard.security import validate_input
 from phishguard.link_manager import get_tracking_link
 from phishguard.reporting import export_campaign_report
-from phishguard.qr_generator import generate_qr_code
 from phishguard.auth import verify_api_key
-from phishguard.audit import write_audit_log, AUDIT_FILE
+from phishguard.audit import write_audit_log, AUDIT_FILE, verify_audit_log
 from phishguard.rate_limit import enforce_rate_limit
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,6 +31,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
     if request.url.path != "/health":
@@ -38,7 +39,20 @@ async def rate_limit_middleware(request, call_next):
 
     response = await call_next(request)
     return response
-    
+
+
+@app.middleware("http")
+async def security_headers_middleware(request, call_next):
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+
+    return response
+
+
 class CampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
@@ -75,7 +89,10 @@ def health():
 def new_campaign(request: CampaignRequest):
     try:
         result = create_campaign(request.name)
-        write_audit_log("campaign_created", {"campaign_name": request.name})
+        write_audit_log(
+            "campaign_created",
+            {"campaign_name": request.name},
+        )
         return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -132,7 +149,10 @@ def new_event(request: EventRequest):
 def security_validation(request: InputRequest):
     try:
         result = validate_input(request.value)
-        write_audit_log("security_validation", {"result": "completed"})
+        write_audit_log(
+            "security_validation",
+            {"result": "completed"},
+        )
         return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -145,7 +165,10 @@ def create_tracking_link(request: LinkRequest):
             request.base_url,
             request.tracking_code,
         )
-        write_audit_log("tracking_link_created", {"status": "success"})
+        write_audit_log(
+            "tracking_link_created",
+            {"status": "success"},
+        )
         return {"tracking_link": link}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -198,13 +221,12 @@ def get_audit_logs(limit: int = 100):
             detail="Unable to read audit logs.",
         )
 
+
 @app.get(
     "/api/audit-logs/verify",
     dependencies=[Depends(verify_api_key)],
 )
 def verify_audit_integrity():
-    from phishguard.audit import verify_audit_log
-
     is_valid = verify_audit_log()
 
     return {
