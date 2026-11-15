@@ -16,7 +16,7 @@ from phishguard.reporting import export_campaign_report
 from phishguard.qr_generator import generate_qr_code
 from phishguard.auth import verify_api_key
 from phishguard.audit import write_audit_log, AUDIT_FILE
-
+from phishguard.rate_limit import enforce_rate_limit
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,7 +31,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.middleware("http")
+async def rate_limit_middleware(request, call_next):
+    if request.url.path != "/health":
+        enforce_rate_limit(request)
 
+    response = await call_next(request)
+    return response
+    
 class CampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
