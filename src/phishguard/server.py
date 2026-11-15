@@ -190,3 +190,17 @@ def get_audit_logs(limit: int = 100):
             status_code=500,
             detail="Unable to read audit logs.",
         )
+
+@app.get(
+    "/api/audit-logs/verify",
+    dependencies=[Depends(verify_api_key)],
+)
+def verify_audit_integrity():
+    from phishguard.audit import verify_audit_log
+
+    is_valid = verify_audit_log()
+
+    return {
+        "integrity": "valid" if is_valid else "tampered",
+        "verified": is_valid,
+    }
