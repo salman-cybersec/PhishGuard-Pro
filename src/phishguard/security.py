@@ -1,3 +1,4 @@
+
 import re
 from html import escape
 
@@ -13,6 +14,14 @@ SUSPICIOUS_PATTERNS = {
         r"(<\s*script\b|javascript\s*:|onerror\s*=|onload\s*=)",
         re.IGNORECASE,
     ),
+    "path_traversal": re.compile(
+        r"(\.\.[/\\]|%2e%2e[/\\])",
+        re.IGNORECASE,
+    ),
+    "command_injection": re.compile(
+        r"(;\s*(cat|curl|wget|rm|whoami)\b|\|\s*(cat|curl|wget)\b)",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -20,8 +29,14 @@ def validate_input(value: str) -> dict:
     if not isinstance(value, str):
         raise ValueError("Input must be text.")
 
+    if not value.strip():
+        raise ValueError("Input cannot be empty.")
+
     if len(value) > MAX_INPUT_LENGTH:
         raise ValueError("Input exceeds the maximum length.")
+
+    if "\x00" in value:
+        raise ValueError("Null bytes are not allowed.")
 
     findings = []
 
@@ -34,4 +49,5 @@ def validate_input(value: str) -> dict:
         "suspicious": bool(findings),
         "findings": findings,
         "safe_display": escape(value),
+        "length": len(value),
     }
