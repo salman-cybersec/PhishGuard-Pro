@@ -1,5 +1,4 @@
 
-import re
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
@@ -20,12 +19,7 @@ class AssetParser(HTMLParser):
 
         if tag == "link":
             rel = attributes.get("rel", "").lower().split()
-
-            if "stylesheet" in rel:
-                value = attributes.get("href")
-
-            else:
-                value = None
+            value = attributes.get("href") if "stylesheet" in rel else None
 
         elif tag == "img":
             value = attributes.get("src")
@@ -38,33 +32,35 @@ class AssetParser(HTMLParser):
 
 
 def import_website(url: str) -> dict:
-    analysis = analyze_website(url)
+    parsed = urlsplit(url)
 
-    original_host = urlsplit(url).hostname
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("A valid HTTPS website URL is required.")
+
+    html = analyze_website(url)
+
+    if not isinstance(html, str):
+        raise ValueError("Website analyzer returned an invalid response.")
 
     parser = AssetParser()
-    parser.feed(analysis["html"])
+    parser.feed(html)
 
     imported_assets = []
     skipped_assets = []
 
-    for asset_reference in parser.assets[:MAX_ASSETS]:
-        asset_url = urljoin(url, asset_reference)
+    for reference in parser.assets[:MAX_ASSETS]:
+        asset_url = urljoin(url, reference)
 
         try:
-            result = download_asset(
-                asset_url,
-                original_host,
-            )
-
+            result = download_asset(asset_url, parsed.hostname)
             imported_assets.append(result)
 
         except (ValueError, RuntimeError):
-            skipped_assets.append(asset_reference)
+            skipped_assets.append(reference)
 
     return {
-        "website": analysis["website"],
-        "page_size": analysis["page_size"],
+        "website": url,
+        "page_size": len(html.encode("utf-8")),
         "assets_found": len(parser.assets),
         "assets_imported": len(imported_assets),
         "assets_skipped": len(skipped_assets),
