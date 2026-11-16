@@ -155,3 +155,60 @@ def test_invalid_charset_uses_utf8_fallback(monkeypatch):
     )
 
     assert result == "<h1>Fallback</h1>"
+
+
+def test_fetch_uses_authorized_hostname_and_size_limit(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        website_importer,
+        "validate_website_authorization",
+        lambda url: {"hostname": "example.com"},
+    )
+
+    def fake_fetch(**kwargs):
+        calls.append(kwargs)
+
+        return {
+            "status_code": 200,
+            "headers": {
+                "Content-Type": "text/html"
+            },
+            "content": b"<h1>Safe</h1>",
+        }
+
+    monkeypatch.setattr(
+        website_importer,
+        "fetch_https",
+        fake_fetch,
+    )
+
+    website_importer.analyze_website(
+        "https://example.com"
+    )
+
+    assert calls[0]["expected_host"] == "example.com"
+    assert calls[0]["max_bytes"] == website_importer.MAX_HTML_SIZE
+
+
+def test_wrong_authorized_hostname_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        website_importer,
+        "validate_website_authorization",
+        lambda url: {"hostname": "other.com"},
+    )
+
+    monkeypatch.setattr(
+        website_importer,
+        "fetch_https",
+        lambda **kwargs: {
+            "status_code": 200,
+            "headers": {"Content-Type": "text/html"},
+            "content": b"<h1>Test</h1>",
+        },
+    )
+
+    with pytest.raises(ValueError):
+        website_importer.analyze_website(
+            "https://example.com"
+        )
