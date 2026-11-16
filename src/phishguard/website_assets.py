@@ -1,10 +1,14 @@
+
 import hashlib
 
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from phishguard.config import DATA_DIR
 from phishguard.safe_http import fetch_https
+from phishguard.css_sanitizer import (
+    sanitize_css,
+    scope_css,
+)
 
 
 ASSET_DIR = DATA_DIR / "website_assets"
@@ -19,7 +23,10 @@ ALLOWED_TYPES = {
 }
 
 
-def _validate_asset_url(url: str, original_host: str) -> str:
+def _validate_asset_url(
+    url: str,
+    original_host: str,
+) -> str:
     try:
         parsed = urlsplit(url)
 
@@ -39,7 +46,9 @@ def _validate_asset_url(url: str, original_host: str) -> str:
         return url
 
     except (ValueError, UnicodeError) as error:
-        raise ValueError("Invalid asset URL.") from error
+        raise ValueError(
+            "Invalid asset URL."
+        ) from error
 
 
 def download_asset(
@@ -79,7 +88,27 @@ def download_asset(
     content = response["content"]
 
     if not content:
-        raise ValueError("Asset is empty.")
+        raise ValueError(
+            "Asset is empty."
+        )
+
+    if content_type == "text/css":
+        try:
+            css_text = content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(
+                "CSS must use valid UTF-8 encoding."
+            ) from error
+
+        safe_css = sanitize_css(css_text)
+        safe_css = scope_css(safe_css)
+
+        if not safe_css:
+            raise ValueError(
+                "CSS contains no supported rules."
+            )
+
+        content = safe_css.encode("utf-8")
 
     digest = hashlib.sha256(content).hexdigest()
     extension = ALLOWED_TYPES[content_type]
@@ -101,4 +130,5 @@ def download_asset(
         "size": len(content),
         "sha256": digest,
         "status": "downloaded",
+        "sanitized": content_type == "text/css",
     }
