@@ -1,9 +1,13 @@
-
 from html.parser import HTMLParser
 from html import escape
+from pathlib import Path
+import secrets
+
+from phishguard.config import DATA_DIR
 
 
 MAX_HTML_SIZE = 2 * 1024 * 1024
+PREVIEW_DIR = DATA_DIR / "website_previews"
 
 ALLOWED_TAGS = {
     "html", "head", "body", "title",
@@ -57,10 +61,7 @@ class WebsiteSanitizer(HTMLParser):
         for name, value in attrs:
             name = name.lower()
 
-            if value is None:
-                continue
-
-            if name not in ALLOWED_ATTRIBUTES:
+            if value is None or name not in ALLOWED_ATTRIBUTES:
                 continue
 
             safe_attributes.append(
@@ -124,3 +125,31 @@ are collected.
 {safe_content}
 </body>
 </html>"""
+
+
+def save_safe_preview(html: str) -> dict:
+    safe_html = create_safe_preview(html)
+
+    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+
+    preview_id = secrets.token_urlsafe(18)
+    filename = f"{preview_id}.html"
+
+    output_path = (PREVIEW_DIR / filename).resolve()
+    safe_directory = PREVIEW_DIR.resolve()
+
+    if output_path.parent != safe_directory:
+        raise ValueError("Invalid preview output path.")
+
+    output_path.write_text(
+        safe_html,
+        encoding="utf-8",
+    )
+
+    return {
+        "preview_id": preview_id,
+        "filename": filename,
+        "path": str(output_path),
+        "size": len(safe_html.encode("utf-8")),
+        "status": "saved",
+    }
