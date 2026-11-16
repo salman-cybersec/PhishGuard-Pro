@@ -11,8 +11,12 @@ from phishguard.website_preview import save_safe_preview
 
 MAX_ASSETS = 30
 
-SAFE_ASSET_FILENAME = re.compile(
+SAFE_IMAGE_FILENAME = re.compile(
     r"^[a-f0-9]{64}\.(?:png|jpg|webp)$"
+)
+
+SAFE_CSS_FILENAME = re.compile(
+    r"^[a-f0-9]{64}\.css$"
 )
 
 
@@ -26,7 +30,11 @@ class AssetParser(HTMLParser):
         attributes = dict(attrs)
 
         if tag == "link":
-            rel = attributes.get("rel", "").lower().split()
+            rel = (
+                attributes.get("rel", "")
+                .lower()
+                .split()
+            )
 
             value = (
                 attributes.get("href")
@@ -46,7 +54,9 @@ class AssetParser(HTMLParser):
 
 def import_website(url: str) -> dict:
     if not isinstance(url, str):
-        raise ValueError("Website URL must be a string.")
+        raise ValueError(
+            "Website URL must be a string."
+        )
 
     try:
         parsed = urlsplit(url)
@@ -78,17 +88,27 @@ def import_website(url: str) -> dict:
     parser.feed(html)
     parser.close()
 
-    unique_assets = list(dict.fromkeys(parser.assets))
+    unique_assets = list(
+        dict.fromkeys(parser.assets)
+    )
+
     selected_assets = unique_assets[:MAX_ASSETS]
 
     imported_assets = []
     skipped_assets = []
-    asset_map = {}
 
-    original_host = parsed.hostname.lower().rstrip(".")
+    image_map = {}
+    css_files = []
+
+    original_host = (
+        parsed.hostname.lower().rstrip(".")
+    )
 
     for tag, reference in selected_assets:
-        asset_url = urljoin(url, reference)
+        asset_url = urljoin(
+            url,
+            reference,
+        )
 
         try:
             result = download_asset(
@@ -96,17 +116,26 @@ def import_website(url: str) -> dict:
                 original_host,
             )
 
-            imported_assets.append(result)
+            filename = result.get(
+                "filename",
+                "",
+            )
 
-            # Only approved raster images are connected
-            # to the local HTML preview.
             if tag == "img":
-                filename = result.get("filename", "")
-
-                if SAFE_ASSET_FILENAME.fullmatch(filename):
-                    asset_map[reference] = (
+                if SAFE_IMAGE_FILENAME.fullmatch(filename):
+                    image_map[reference] = (
                         f"/assets/{filename}"
                     )
+                    imported_assets.append(result)
+                else:
+                    skipped_assets.append(reference)
+
+            elif tag == "link":
+                if SAFE_CSS_FILENAME.fullmatch(filename):
+                    css_files.append(filename)
+                    imported_assets.append(result)
+                else:
+                    skipped_assets.append(reference)
 
         except (ValueError, RuntimeError):
             skipped_assets.append(reference)
@@ -116,11 +145,10 @@ def import_website(url: str) -> dict:
         for tag, reference in unique_assets[MAX_ASSETS:]
     )
 
-    # Save the preview after downloading assets so that
-    # the sanitizer can replace original image URLs.
     preview = save_safe_preview(
         html,
-        asset_map=asset_map,
+        asset_map=image_map,
+        css_files=css_files,
     )
 
     return {
@@ -138,7 +166,9 @@ def import_website(url: str) -> dict:
         "unique_assets_found": len(unique_assets),
         "assets_imported": len(imported_assets),
         "assets_skipped": len(skipped_assets),
-        "images_connected": len(asset_map),
+        "images_connected": len(image_map),
+        "stylesheets_connected": len(css_files),
+        "css_files": css_files,
         "imported_files": imported_assets,
         "skipped_files": skipped_assets,
         "status": "import_completed",
