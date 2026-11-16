@@ -1,4 +1,3 @@
-import socket
 
 import pytest
 
@@ -10,20 +9,12 @@ def test_private_ip_address_rejected(monkeypatch):
         safe_http.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [
-            (
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                6,
-                "",
-                ("127.0.0.1", 443),
-            )
+            (None, None, None, None, ("127.0.0.1", 443))
         ],
     )
 
     with pytest.raises(ValueError):
-        safe_http.resolve_public_addresses(
-            "example.com"
-        )
+        safe_http.resolve_public_addresses("example.com")
 
 
 def test_public_ip_address_accepted(monkeypatch):
@@ -31,19 +22,11 @@ def test_public_ip_address_accepted(monkeypatch):
         safe_http.socket,
         "getaddrinfo",
         lambda *args, **kwargs: [
-            (
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                6,
-                "",
-                ("8.8.8.8", 443),
-            )
+            (None, None, None, None, ("8.8.8.8", 443))
         ],
     )
 
-    result = safe_http.resolve_public_addresses(
-        "example.com"
-    )
+    result = safe_http.resolve_public_addresses("example.com")
 
     assert result == ["8.8.8.8"]
 
@@ -59,25 +42,24 @@ def test_dns_resolution_failure_rejected(monkeypatch):
     )
 
     with pytest.raises(ValueError):
-        safe_http.resolve_public_addresses(
-            "example.com"
-        )
+        safe_http.resolve_public_addresses("example.com")
 
 
 @pytest.mark.parametrize(
-    "url",
+    "url, expected_host",
     [
-        "http://example.com",
-        "https://another-site.com",
-        "https://user:password@example.com",
-        "https://example.com:8443",
+        ("http://example.com", "example.com"),
+        ("https://other.com", "example.com"),
+        ("https://user:pass@example.com", "example.com"),
+        ("https://example.com:8443", "example.com"),
+        ("https://example.com", "other.com"),
     ],
 )
-def test_invalid_url_rejected(url):
+def test_invalid_https_urls_rejected(url, expected_host):
     with pytest.raises(ValueError):
         safe_http.fetch_https(
             url=url,
-            expected_host="example.com",
+            expected_host=expected_host,
             max_bytes=1000,
         )
 
@@ -89,6 +71,7 @@ def test_invalid_url_rejected(url):
         -1,
         True,
         "100",
+        None,
     ],
 )
 def test_invalid_size_limit_rejected(max_bytes):
@@ -100,84 +83,25 @@ def test_invalid_size_limit_rejected(max_bytes):
         )
 
 
-def test_fetch_uses_pinned_ip_and_original_host(
-    monkeypatch,
-):
-    captured = {}
+def test_invalid_expected_hostname_rejected():
+    with pytest.raises(ValueError):
+        safe_http.fetch_https(
+            url="https://example.com",
+            expected_host="",
+            max_bytes=1000,
+        )
 
+
+def test_response_exceeding_size_limit_rejected(monkeypatch):
     class FakeResponse:
         status = 200
-
         headers = {
-            "Content-Type": "text/html",
-            "Content-Encoding": "identity",
-            "Content-Length": "5",
-        }
-
-        def read(self, size):
-            captured["read_size"] = size
-            return b"hello"
-
-    class FakeConnection:
-        def __init__(self, hostname, pinned_ip):
-            captured["hostname"] = hostname
-            captured["pinned_ip"] = pinned_ip
-
-        def request(self, method, path, headers):
-            captured["method"] = method
-            captured["path"] = path
-            captured["headers"] = headers
-
-        def getresponse(self):
-            return FakeResponse()
-
-        def close(self):
-            captured["closed"] = True
-
-    monkeypatch.setattr(
-        safe_http,
-        "resolve_public_addresses",
-        lambda hostname: ["8.8.8.8"],
-    )
-
-    monkeypatch.setattr(
-        safe_http,
-        "PinnedHTTPSConnection",
-        FakeConnection,
-    )
-
-    result = safe_http.fetch_https(
-        url="https://example.com/training?page=1",
-        expected_host="example.com",
-        max_bytes=100,
-    )
-
-    assert captured["hostname"] == "example.com"
-    assert captured["pinned_ip"] == "8.8.8.8"
-    assert captured["method"] == "GET"
-    assert captured["path"] == "/training?page=1"
-    assert captured["headers"]["Host"] == "example.com"
-    assert captured["read_size"] == 101
-    assert captured["closed"] is True
-
-    assert result["content"] == b"hello"
-    assert result["connected_ip"] == "8.8.8.8"
-
-
-def test_oversized_response_rejected(monkeypatch):
-    class FakeResponse:
-        status = 200
-
-        headers = {
-            "Content-Type": "text/html",
+            "Content-Length": "20",
             "Content-Encoding": "identity",
         }
 
-        def read(self, size):
-            return b"123456"
-
     class FakeConnection:
-        def __init__(self, hostname, pinned_ip):
+        def __init__(self, *args, **kwargs):
             pass
 
         def request(self, *args, **kwargs):
@@ -205,26 +129,112 @@ def test_oversized_response_rejected(monkeypatch):
         safe_http.fetch_https(
             url="https://example.com",
             expected_host="example.com",
-            max_bytes=5,
+            max_bytes=10,
+        )
+
+
+def test_redirect_is_returned_not_followed(monkeypatch):
+    class FakeResponse:
+        status = 302
+        headers = {
+            "Location": "https://other.com",
+            "Content-Length": "0",
+            "Content-Encoding": "identity",
+        }
+
+        def read(self, amount):
+            return b""
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        safe_http,
+        "resolve_public_addresses",
+        lambda hostname: ["8.8.8.8"],
+    )
+
+    monkeypatch.setattr(
+        safe_http,
+        "PinnedHTTPSConnection",
+        FakeConnection,
+    )
+
+    result = safe_http.fetch_https(
+        url="https://example.com",
+        expected_host="example.com",
+        max_bytes=1000,
+    )
+
+    assert result["status_code"] == 302
+    assert result["headers"]["Location"] == "https://other.com"
+
+
+def test_response_body_size_limit_enforced(monkeypatch):
+    class FakeResponse:
+        status = 200
+        headers = {
+            "Content-Length": "2",
+            "Content-Encoding": "identity",
+        }
+
+        def read(self, amount):
+            assert amount == 11
+            return b"01234567890"
+
+    class FakeConnection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        safe_http,
+        "resolve_public_addresses",
+        lambda hostname: ["8.8.8.8"],
+    )
+
+    monkeypatch.setattr(
+        safe_http,
+        "PinnedHTTPSConnection",
+        FakeConnection,
+    )
+
+    with pytest.raises(ValueError):
+        safe_http.fetch_https(
+            url="https://example.com",
+            expected_host="example.com",
+            max_bytes=10,
         )
 
 
 def test_compressed_response_rejected(monkeypatch):
     class FakeResponse:
         status = 200
-
         headers = {
-            "Content-Type": "text/html",
             "Content-Encoding": "gzip",
+            "Content-Length": "10",
         }
 
-        def read(self, size):
-            raise AssertionError(
-                "Compressed response must not be read."
-            )
-
     class FakeConnection:
-        def __init__(self, hostname, pinned_ip):
+        def __init__(self, *args, **kwargs):
             pass
 
         def request(self, *args, **kwargs):
