@@ -74,6 +74,56 @@ def test_non_string_html_rejected():
     with pytest.raises(ValueError):
         create_safe_preview(123)
 
+def test_javascript_links_are_removed():
+    result = create_safe_preview(
+        '<a href="javascript:alert(1)">Click</a>'
+    )
+
+    assert "javascript:" not in result
+    assert "alert(1)" not in result
+    assert "Click" in result
+
+
+def test_data_attributes_are_removed():
+    result = create_safe_preview(
+        '<div data-secret="123" onclick="alert(1)">Safe text</div>'
+    )
+
+    assert "data-secret" not in result
+    assert "onclick" not in result
+    assert "123" not in result
+    assert "Safe text" in result
+
+
+def test_html_comments_are_not_rendered():
+    result = create_safe_preview(
+        "<!-- hidden comment --><p>Visible content</p>"
+    )
+
+    assert "hidden comment" not in result
+    assert "Visible content" in result
+
+
+def test_nested_script_content_is_removed():
+    result = create_safe_preview(
+        "<script><script>alert(1)</script>"
+        "<p>Hidden content</p></script>"
+        "<p>Visible content</p>"
+    )
+
+    assert "alert(1)" not in result
+    assert "Hidden content" not in result
+    assert "Visible content" in result
+
+
+def test_external_links_are_not_preserved():
+    result = create_safe_preview(
+        '<a href="https://example.com">External link</a>'
+    )
+
+    assert "https://example.com" not in result
+    assert "External link" in result
+
 
 def test_html_size_limit():
     with pytest.raises(ValueError):
