@@ -22,6 +22,9 @@ from phishguard.audit import write_audit_log, AUDIT_FILE, verify_audit_log
 from phishguard.rate_limit import enforce_rate_limit
 from phishguard.request_limits import RequestSizeLimitMiddleware
 
+# Training submission router
+from phishguard.training_submission import router as training_router
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,6 +38,9 @@ app = FastAPI(
     description="Authorized security awareness lab API.",
     lifespan=lifespan,
 )
+
+# Register training submission endpoint
+app.include_router(training_router)
 
 app.add_middleware(
     RequestSizeLimitMiddleware,
