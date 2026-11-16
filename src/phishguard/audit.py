@@ -1,14 +1,15 @@
 
 from datetime import datetime, timezone
-from threading import Lock
+from threading import RLock
 import hashlib
+import hmac
 import json
 
 from phishguard.config import DATA_DIR
 
 
 AUDIT_FILE = DATA_DIR / "audit.log"
-_AUDIT_LOCK = Lock()
+_AUDIT_LOCK = RLock()
 
 SENSITIVE_KEYS = {
     "password",
@@ -55,6 +56,47 @@ def _sanitize_details(value):
     raise ValueError("Audit details contain unsupported data.")
 
 
+def _verify_audit_log_unlocked() -> bool:
+    if not AUDIT_FILE.exists():
+        return True
+
+    previous_hash = "GENESIS"
+
+    try:
+        lines = AUDIT_FILE.read_text(
+            encoding="utf-8"
+        ).splitlines()
+
+        for line in lines:
+            if not line.strip():
+                return False
+
+            entry = json.loads(line)
+
+            if not isinstance(entry, dict):
+                return False
+
+            stored_hash = entry.pop("entry_hash", None)
+
+            if not isinstance(stored_hash, str):
+                return False
+
+            if entry.get("previous_hash") != previous_hash:
+                return False
+
+            calculated_hash = _calculate_hash(entry)
+
+            if not hmac.compare_digest(stored_hash, calculated_hash):
+                return False
+
+            previous_hash = stored_hash
+
+        return True
+
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+
+
 def write_audit_log(
     action: str,
     details: dict | None = None,
@@ -78,15 +120,15 @@ def write_audit_log(
         with _AUDIT_LOCK:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+            if not _verify_audit_log_unlocked():
+                raise RuntimeError(
+                    "Audit log integrity check failed. "
+                    "No new entries were written."
+                )
+
             previous_hash = "GENESIS"
 
             if AUDIT_FILE.exists():
-                if not verify_audit_log():
-                    raise RuntimeError(
-                        "Audit log integrity check failed. "
-                        "No new entries were written."
-                    )
-
                 lines = AUDIT_FILE.read_text(
                     encoding="utf-8"
                 ).splitlines()
@@ -105,9 +147,7 @@ def write_audit_log(
             entry["entry_hash"] = _calculate_hash(entry)
 
             with AUDIT_FILE.open("a", encoding="utf-8") as file:
-                file.write(
-                    json.dumps(entry, ensure_ascii=False) + "\n"
-                )
+                file.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 file.flush()
 
             return entry
@@ -117,45 +157,5 @@ def write_audit_log(
 
 
 def verify_audit_log() -> bool:
-    if not AUDIT_FILE.exists():
-        return True
-
-    previous_hash = "GENESIS"
-
-    try:
-        with _AUDIT_LOCK:
-            lines = AUDIT_FILE.read_text(
-                encoding="utf-8"
-            ).splitlines()
-
-            for line in lines:
-                if not line.strip():
-                    return False
-
-                entry = json.loads(line)
-
-                if not isinstance(entry, dict):
-                    return False
-
-                stored_hash = entry.pop("entry_hash", None)
-
-                if not isinstance(stored_hash, str):
-                    return False
-
-                if entry.get("previous_hash") != previous_hash:
-                    return False
-
-                calculated_hash = _calculate_hash(entry)
-
-                if not hashlib.compare_digest(
-                    stored_hash,
-                    calculated_hash,
-                ):
-                    return False
-
-                previous_hash = stored_hash
-
-            return True
-
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return False
+    with _AUDIT_LOCK:
+        return _verify_audit_log_unlocked()
