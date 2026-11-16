@@ -1,4 +1,6 @@
 
+import re
+
 import tinycss2
 
 
@@ -66,6 +68,14 @@ BLOCKED_FUNCTIONS = {
     "attr",
 }
 
+SAFE_SELECTOR_PATTERN = re.compile(
+    r"""^[a-zA-Z0-9_*#.\[\]="' :>+~\-():]+$"""
+)
+
+SAFE_SCOPE_PATTERN = re.compile(
+    r"^\.[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+)
+
 
 def _contains_unsafe_token(tokens):
     for token in tokens:
@@ -97,6 +107,118 @@ def _contains_unsafe_token(tokens):
     return False
 
 
+def _safe_declarations(content):
+    declarations = tinycss2.parse_declaration_list(
+        content,
+        skip_comments=True,
+        skip_whitespace=True,
+    )
+
+    safe_declarations = []
+
+    for declaration in declarations:
+        if declaration.type != "declaration":
+            continue
+
+        property_name = declaration.lower_name
+
+        if property_name not in ALLOWED_PROPERTIES:
+            continue
+
+        if declaration.important:
+            continue
+
+        if _contains_unsafe_token(declaration.value):
+            continue
+
+        value = tinycss2.serialize(
+            declaration.value
+        ).strip()
+
+        if not value or len(value) > 500:
+            continue
+
+        safe_declarations.append(
+            f"{property_name}: {value}"
+        )
+
+    return safe_declarations
+
+
+def _split_selectors(selector_text):
+    selectors = []
+    current = []
+
+    depth = 0
+    quote = None
+    escaped = False
+
+    for character in selector_text:
+        if escaped:
+            current.append(character)
+            escaped = False
+            continue
+
+        if character == "\\":
+            current.append(character)
+            escaped = True
+            continue
+
+        if quote:
+            current.append(character)
+
+            if character == quote:
+                quote = None
+
+            continue
+
+        if character in {"'", '"'}:
+            quote = character
+            current.append(character)
+            continue
+
+        if character == "(" or character == "[":
+            depth += 1
+            current.append(character)
+            continue
+
+        if character == ")" or character == "]":
+            depth -= 1
+
+            if depth < 0:
+                return []
+
+            current.append(character)
+            continue
+
+        if character == "," and depth == 0:
+            selectors.append(
+                "".join(current).strip()
+            )
+            current = []
+            continue
+
+        current.append(character)
+
+    if depth != 0 or quote or escaped:
+        return []
+
+    selectors.append(
+        "".join(current).strip()
+    )
+
+    return selectors
+
+
+def _scope_selector(selector, scope):
+    normalized = selector.strip().lower()
+
+    if normalized in {"html", "body", ":root"}:
+        return scope
+
+    return f"{scope} {selector}"
+
+
 def sanitize_css(css: str) -> str:
     if not isinstance(css, str):
         raise ValueError("CSS content must be text.")
@@ -114,8 +236,6 @@ def sanitize_css(css: str) -> str:
         safe_rules = []
 
         for rule in rules:
-            # At-rules such as @import and @font-face
-            # are not permitted.
             if rule.type != "qualified-rule":
                 continue
 
@@ -132,63 +252,24 @@ def sanitize_css(css: str) -> str:
             ):
                 continue
 
-            declarations = tinycss2.parse_declaration_list(
-                rule.content,
-                skip_comments=True,
-                skip_whitespace=True,
+            declarations = _safe_declarations(
+                rule.content
             )
 
-            safe_declarations = []
-
-            for declaration in declarations:
-                if declaration.type != "declaration":
-                    continue
-
-                property_name = declaration.lower_name
-
-                if property_name not in ALLOWED_PROPERTIES:
-                    continue
-
-                if declaration.important:
-                    continue
-
-                if _contains_unsafe_token(
-                    declaration.value
-                ):
-                    continue
-
-                value = tinycss2.serialize(
-                    declaration.value
-                ).strip()
-
-                if not value or len(value) > 500:
-                    continue
-
-                safe_declarations.append(
-                    f"{property_name}: {value}"
-                )
-
-            if safe_declarations:
+            if declarations:
                 safe_rules.append(
                     selector
                     + " { "
-                    + "; ".join(safe_declarations)
+                    + "; ".join(declarations)
                     + "; }"
                 )
 
         return "\n".join(safe_rules)
 
     except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError("CSS sanitization failed.") from error
-
-
-import re
-
-
-SAFE_SELECTOR_PATTERN = re.compile(
-    r"^[a-zA-Z0-9_*#.\[\]=\"' :>+~\-"
-    r":()]+$"
-)
+        raise ValueError(
+            "CSS sanitization failed."
+        ) from error
 
 
 def scope_css(
@@ -198,9 +279,9 @@ def scope_css(
     if not isinstance(css, str):
         raise ValueError("CSS content must be text.")
 
-    if not isinstance(scope, str) or not re.fullmatch(
-        r"\.[a-zA-Z][a-zA-Z0-9_-]{0,63}",
-        scope,
+    if (
+        not isinstance(scope, str)
+        or not SAFE_SCOPE_PATTERN.fullmatch(scope)
     ):
         raise ValueError("Invalid CSS scope.")
 
@@ -224,10 +305,12 @@ def scope_css(
                 rule.prelude
             ).strip()
 
-            selectors = [
-                item.strip()
-                for item in selector_text.split(",")
-            ]
+            if not selector_text or len(selector_text) > 1000:
+                continue
+
+            selectors = _split_selectors(
+                selector_text
+            )
 
             if not selectors:
                 continue
@@ -240,54 +323,28 @@ def scope_css(
             ):
                 continue
 
-            declarations = tinycss2.parse_declaration_list(
-                rule.content,
-                skip_comments=True,
-                skip_whitespace=True,
+            declarations = _safe_declarations(
+                rule.content
             )
 
-            safe_declarations = []
-
-            for declaration in declarations:
-                if declaration.type != "declaration":
-                    continue
-
-                if declaration.lower_name not in ALLOWED_PROPERTIES:
-                    continue
-
-                if declaration.important:
-                    continue
-
-                if _contains_unsafe_token(declaration.value):
-                    continue
-
-                value = tinycss2.serialize(
-                    declaration.value
-                ).strip()
-
-                if not value or len(value) > 500:
-                    continue
-
-                safe_declarations.append(
-                    f"{declaration.lower_name}: {value}"
-                )
-
-            if not safe_declarations:
+            if not declarations:
                 continue
 
             scoped_selectors = [
-                f"{scope} {selector}"
+                _scope_selector(selector, scope)
                 for selector in selectors
             ]
 
             scoped_rules.append(
                 ", ".join(scoped_selectors)
                 + " { "
-                + "; ".join(safe_declarations)
+                + "; ".join(declarations)
                 + "; }"
             )
 
         return "\n".join(scoped_rules)
 
     except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError("CSS scoping failed.") from error
+        raise ValueError(
+            "CSS scoping failed."
+        ) from error
