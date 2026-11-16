@@ -1,9 +1,9 @@
-
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from phishguard.website_importer import analyze_website
 from phishguard.website_assets import download_asset
+from phishguard.website_preview import create_safe_preview
 
 
 MAX_ASSETS = 30
@@ -17,11 +17,15 @@ class AssetParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
 
-        if tag == "link":
+        if tag.lower() == "link":
             rel = attributes.get("rel", "").lower().split()
-            value = attributes.get("href") if "stylesheet" in rel else None
+            value = (
+                attributes.get("href")
+                if "stylesheet" in rel
+                else None
+            )
 
-        elif tag == "img":
+        elif tag.lower() == "img":
             value = attributes.get("src")
 
         else:
@@ -32,9 +36,18 @@ class AssetParser(HTMLParser):
 
 
 def import_website(url: str) -> dict:
+    if not isinstance(url, str):
+        raise ValueError("Website URL must be a string.")
+
     parsed = urlsplit(url)
 
-    if parsed.scheme != "https" or not parsed.hostname:
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in (None, 443)
+    ):
         raise ValueError("A valid HTTPS website URL is required.")
 
     html = analyze_website(url)
@@ -42,8 +55,11 @@ def import_website(url: str) -> dict:
     if not isinstance(html, str):
         raise ValueError("Website analyzer returned an invalid response.")
 
+    safe_preview = create_safe_preview(html)
+
     parser = AssetParser()
     parser.feed(html)
+    parser.close()
 
     unique_assets = list(dict.fromkeys(parser.assets))
     selected_assets = unique_assets[:MAX_ASSETS]
@@ -55,7 +71,10 @@ def import_website(url: str) -> dict:
         asset_url = urljoin(url, reference)
 
         try:
-            result = download_asset(asset_url, parsed.hostname)
+            result = download_asset(
+                asset_url,
+                parsed.hostname,
+            )
             imported_assets.append(result)
 
         except (ValueError, RuntimeError):
@@ -66,6 +85,11 @@ def import_website(url: str) -> dict:
     return {
         "website": url,
         "page_size": len(html.encode("utf-8")),
+        "preview_html": safe_preview,
+        "preview_size": len(safe_preview.encode("utf-8")),
+        "preview_type": "sanitized_static_html",
+        "javascript_executed": False,
+        "credentials_collected": False,
         "assets_found": len(parser.assets),
         "unique_assets_found": len(unique_assets),
         "assets_imported": len(imported_assets),
