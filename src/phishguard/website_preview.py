@@ -39,6 +39,10 @@ LOCAL_ASSET_PATTERN = re.compile(
     r"^/assets/[a-f0-9]{64}\.(?:png|jpg|webp)$"
 )
 
+CSS_FILENAME_PATTERN = re.compile(
+    r"^[a-f0-9]{64}\.css$"
+)
+
 
 def _get_safe_asset_path(
     original_src: str,
@@ -114,7 +118,9 @@ class WebsiteSanitizer(HTMLParser):
         if safe_attributes:
             attributes = " " + " ".join(safe_attributes)
 
-        self.output.append(f"<{tag}{attributes}>")
+        self.output.append(
+            f"<{tag}{attributes}>"
+        )
 
     def handle_endtag(self, tag):
         tag = tag.lower()
@@ -125,34 +131,81 @@ class WebsiteSanitizer(HTMLParser):
             return
 
         if tag in ALLOWED_TAGS and tag not in VOID_TAGS:
-            self.output.append(f"</{tag}>")
+            self.output.append(
+                f"</{tag}>"
+            )
 
     def handle_data(self, data):
         if not self.blocked_stack:
-            self.output.append(escape(data))
+            self.output.append(
+                escape(data)
+            )
 
     def get_html(self):
         return "".join(self.output)
 
 
+def _build_css_links(css_files):
+    if css_files is None:
+        css_files = []
+
+    if not isinstance(css_files, (list, tuple)):
+        raise ValueError(
+            "CSS file list must be a list."
+        )
+
+    links = []
+    seen = set()
+
+    for filename in css_files:
+        if not isinstance(filename, str):
+            continue
+
+        if not CSS_FILENAME_PATTERN.fullmatch(filename):
+            continue
+
+        if filename in seen:
+            continue
+
+        seen.add(filename)
+
+        links.append(
+            '<link rel="stylesheet" '
+            f'href="/assets/{escape(filename, quote=True)}">'
+        )
+
+    return "\n".join(links)
+
+
 def create_safe_preview(
     html: str,
     asset_map=None,
+    css_files=None,
 ) -> str:
     if not isinstance(html, str):
-        raise ValueError("HTML content must be a string.")
+        raise ValueError(
+            "HTML content must be a string."
+        )
 
     if len(html.encode("utf-8")) > MAX_HTML_SIZE:
-        raise ValueError("HTML preview exceeds the 2 MB limit.")
+        raise ValueError(
+            "HTML preview exceeds the 2 MB limit."
+        )
 
     if asset_map is not None and not isinstance(asset_map, dict):
-        raise ValueError("Asset mapping must be a dictionary.")
+        raise ValueError(
+            "Asset mapping must be a dictionary."
+        )
 
-    sanitizer = WebsiteSanitizer(asset_map)
+    sanitizer = WebsiteSanitizer(
+        asset_map
+    )
+
     sanitizer.feed(html)
     sanitizer.close()
 
     safe_content = sanitizer.get_html()
+    safe_css_links = _build_css_links(css_files)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -160,6 +213,7 @@ def create_safe_preview(
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Authorized Security Awareness Preview</title>
+{safe_css_links}
 </head>
 <body>
 <div style="padding:14px;background:#fff3cd;color:#664d03;
@@ -169,7 +223,9 @@ font-family:Arial,sans-serif;text-align:center;">
 This is a sanitized static preview. No passwords or credentials
 are collected.
 </div>
+<div class="phishguard-preview">
 {safe_content}
+</div>
 </body>
 </html>"""
 
@@ -177,22 +233,31 @@ are collected.
 def save_safe_preview(
     html: str,
     asset_map=None,
+    css_files=None,
 ) -> dict:
     safe_html = create_safe_preview(
         html,
         asset_map=asset_map,
+        css_files=css_files,
     )
 
-    PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    PREVIEW_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     preview_id = secrets.token_urlsafe(18)
     filename = f"{preview_id}.html"
 
-    output_path = (PREVIEW_DIR / filename).resolve()
     safe_directory = PREVIEW_DIR.resolve()
+    output_path = (
+        safe_directory / filename
+    ).resolve()
 
     if output_path.parent != safe_directory:
-        raise ValueError("Invalid preview output path.")
+        raise ValueError(
+            "Invalid preview output path."
+        )
 
     output_path.write_text(
         safe_html,
