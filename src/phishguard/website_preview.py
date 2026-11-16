@@ -1,6 +1,7 @@
+
 from html.parser import HTMLParser
 from html import escape
-from pathlib import Path
+import re
 import secrets
 
 from phishguard.config import DATA_DIR
@@ -34,12 +35,36 @@ ALLOWED_ATTRIBUTES = {
     "width", "height", "colspan", "rowspan",
 }
 
+LOCAL_ASSET_PATTERN = re.compile(
+    r"^/assets/[a-f0-9]{64}\.(?:png|jpg|webp)$"
+)
+
+
+def _get_safe_asset_path(
+    original_src: str,
+    asset_map: dict,
+) -> str | None:
+    if not isinstance(original_src, str):
+        return None
+
+    local_path = asset_map.get(original_src)
+
+    if not isinstance(local_path, str):
+        return None
+
+    if not LOCAL_ASSET_PATTERN.fullmatch(local_path):
+        return None
+
+    return local_path
+
 
 class WebsiteSanitizer(HTMLParser):
-    def __init__(self):
+    def __init__(self, asset_map=None):
         super().__init__(convert_charrefs=True)
+
         self.output = []
         self.blocked_stack = []
+        self.asset_map = asset_map or {}
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -61,7 +86,23 @@ class WebsiteSanitizer(HTMLParser):
         for name, value in attrs:
             name = name.lower()
 
-            if value is None or name not in ALLOWED_ATTRIBUTES:
+            if value is None:
+                continue
+
+            if name == "src" and tag == "img":
+                local_path = _get_safe_asset_path(
+                    value,
+                    self.asset_map,
+                )
+
+                if local_path:
+                    safe_attributes.append(
+                        f'src="{escape(local_path, quote=True)}"'
+                    )
+
+                continue
+
+            if name not in ALLOWED_ATTRIBUTES:
                 continue
 
             safe_attributes.append(
@@ -94,14 +135,20 @@ class WebsiteSanitizer(HTMLParser):
         return "".join(self.output)
 
 
-def create_safe_preview(html: str) -> str:
+def create_safe_preview(
+    html: str,
+    asset_map=None,
+) -> str:
     if not isinstance(html, str):
         raise ValueError("HTML content must be a string.")
 
     if len(html.encode("utf-8")) > MAX_HTML_SIZE:
         raise ValueError("HTML preview exceeds the 2 MB limit.")
 
-    sanitizer = WebsiteSanitizer()
+    if asset_map is not None and not isinstance(asset_map, dict):
+        raise ValueError("Asset mapping must be a dictionary.")
+
+    sanitizer = WebsiteSanitizer(asset_map)
     sanitizer.feed(html)
     sanitizer.close()
 
@@ -127,8 +174,14 @@ are collected.
 </html>"""
 
 
-def save_safe_preview(html: str) -> dict:
-    safe_html = create_safe_preview(html)
+def save_safe_preview(
+    html: str,
+    asset_map=None,
+) -> dict:
+    safe_html = create_safe_preview(
+        html,
+        asset_map=asset_map,
+    )
 
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
