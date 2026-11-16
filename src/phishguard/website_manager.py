@@ -45,10 +45,13 @@ def import_website(url: str) -> dict:
     parser = AssetParser()
     parser.feed(html)
 
+    unique_assets = list(dict.fromkeys(parser.assets))
+    selected_assets = unique_assets[:MAX_ASSETS]
+
     imported_assets = []
     skipped_assets = []
 
-    for reference in parser.assets[:MAX_ASSETS]:
+    for reference in selected_assets:
         asset_url = urljoin(url, reference)
 
         try:
@@ -58,10 +61,13 @@ def import_website(url: str) -> dict:
         except (ValueError, RuntimeError):
             skipped_assets.append(reference)
 
+    skipped_assets.extend(unique_assets[MAX_ASSETS:])
+
     return {
         "website": url,
         "page_size": len(html.encode("utf-8")),
         "assets_found": len(parser.assets),
+        "unique_assets_found": len(unique_assets),
         "assets_imported": len(imported_assets),
         "assets_skipped": len(skipped_assets),
         "imported_files": imported_assets,
