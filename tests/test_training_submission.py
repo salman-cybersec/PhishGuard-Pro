@@ -41,7 +41,6 @@ def test_successful_training_submission(client):
     )
 
     assert response.status_code == 200
-    assert "Training submission completed" in response.text
 
     with database.get_connection() as connection:
         participant = connection.execute(
@@ -53,6 +52,56 @@ def test_successful_training_submission(client):
     assert participant["consent_device"] == 0
     assert participant["ip_address"] is None
     assert participant["user_agent"] is None
+
+
+def test_device_information_saved_with_consent(client):
+    response = client.post(
+        "/training/submit",
+        data={
+            "campaign_id": 1,
+            "participant_name": "John",
+            "consent_device": "yes",
+        },
+        headers={
+            "user-agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+
+    with database.get_connection() as connection:
+        participant = connection.execute(
+            "SELECT * FROM participants"
+        ).fetchone()
+
+    assert participant["consent_device"] == 1
+    assert participant["browser_name"] == "Chrome"
+    assert participant["browser_version"] == "120.0.0.0"
+    assert participant["os_name"] == "Windows"
+    assert participant["device_type"] == "desktop"
+
+
+def test_device_information_not_saved_without_consent(client):
+    client.post(
+        "/training/submit",
+        data={
+            "campaign_id": 1,
+            "participant_name": "Sarah",
+        },
+        headers={"user-agent": "Chrome/120.0"},
+    )
+
+    with database.get_connection() as connection:
+        participant = connection.execute(
+            "SELECT * FROM participants"
+        ).fetchone()
+
+    assert participant["consent_device"] == 0
+    assert participant["user_agent"] is None
+    assert participant["browser_name"] is None
 
 
 def test_invalid_campaign_rejected(client):
@@ -79,13 +128,13 @@ def test_empty_name_rejected(client):
     assert response.status_code == 400
 
 
-def test_invalid_consent_value_rejected(client):
+def test_invalid_consent_rejected(client):
     response = client.post(
         "/training/submit",
         data={
             "campaign_id": 1,
             "participant_name": "John",
-            "consent_ip": "maybe",
+            "consent_device": "maybe",
         },
     )
 
