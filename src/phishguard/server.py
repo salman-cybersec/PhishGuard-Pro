@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from phishguard.config import (
@@ -22,8 +23,9 @@ from phishguard.audit import write_audit_log, AUDIT_FILE, verify_audit_log
 from phishguard.rate_limit import enforce_rate_limit
 from phishguard.request_limits import RequestSizeLimitMiddleware
 
-# Training submission router
 from phishguard.training_submission import router as training_router
+from phishguard.participant_reports import get_participant_report
+from phishguard.participant_export import export_participants_csv
 
 
 @asynccontextmanager
@@ -197,6 +199,38 @@ def create_tracking_link(request: LinkRequest):
 def campaign_report(campaign_id: int):
     try:
         return export_campaign_report(campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}/participants",
+    dependencies=[Depends(verify_api_key)],
+)
+def participant_report(campaign_id: int):
+    try:
+        return get_participant_report(campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@app.get(
+    "/api/campaigns/{campaign_id}/participants/export",
+    dependencies=[Depends(verify_api_key)],
+)
+def export_participant_report(campaign_id: int):
+    try:
+        csv_data = export_participants_csv(campaign_id)
+
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="participants_{campaign_id}.csv"'
+                )
+            },
+        )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
 
