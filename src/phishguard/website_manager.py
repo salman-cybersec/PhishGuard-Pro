@@ -3,7 +3,7 @@ from urllib.parse import urljoin, urlsplit
 
 from phishguard.website_importer import analyze_website
 from phishguard.website_assets import download_asset
-from phishguard.website_preview import create_safe_preview
+from phishguard.website_preview import save_safe_preview
 
 
 MAX_ASSETS = 30
@@ -55,7 +55,7 @@ def import_website(url: str) -> dict:
     if not isinstance(html, str):
         raise ValueError("Website analyzer returned an invalid response.")
 
-    safe_preview = create_safe_preview(html)
+    preview = save_safe_preview(html)
 
     parser = AssetParser()
     parser.feed(html)
@@ -85,8 +85,11 @@ def import_website(url: str) -> dict:
     return {
         "website": url,
         "page_size": len(html.encode("utf-8")),
-        "preview_html": safe_preview,
-        "preview_size": len(safe_preview.encode("utf-8")),
+        "preview_id": preview["preview_id"],
+        "preview_filename": preview["filename"],
+        "preview_path": preview["path"],
+        "preview_size": preview["size"],
+        "preview_status": preview["status"],
         "preview_type": "sanitized_static_html",
         "javascript_executed": False,
         "credentials_collected": False,
