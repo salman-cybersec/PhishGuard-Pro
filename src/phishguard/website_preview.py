@@ -3,37 +3,31 @@ from html.parser import HTMLParser
 from html import escape
 
 
-BLOCKED_TAGS = {
-    "script",
-    "iframe",
-    "frame",
-    "frameset",
-    "object",
-    "embed",
-    "form",
-    "base",
-}
+MAX_HTML_SIZE = 2 * 1024 * 1024
 
-
-VOID_TAGS = {
-    "area",
-    "br",
-    "col",
-    "hr",
+ALLOWED_TAGS = {
+    "html", "head", "body", "title",
+    "main", "header", "footer", "section",
+    "article", "div", "span", "p",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li",
+    "strong", "b", "em", "i", "u",
+    "br", "hr",
+    "table", "thead", "tbody", "tr", "th", "td",
     "img",
-    "input",
-    "link",
-    "meta",
-    "param",
-    "source",
-    "track",
-    "wbr",
 }
 
+VOID_TAGS = {"br", "hr", "img"}
 
-ALLOWED_URL_ATTRIBUTES = {
-    "href",
-    "src",
+BLOCKED_CONTENT_TAGS = {
+    "script", "style", "iframe", "frame",
+    "frameset", "object", "embed", "form",
+    "svg", "math", "template", "noscript",
+}
+
+ALLOWED_ATTRIBUTES = {
+    "class", "id", "title", "alt",
+    "width", "height", "colspan", "rowspan",
 }
 
 
@@ -41,18 +35,21 @@ class WebsiteSanitizer(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.output = []
-        self.blocked_depth = 0
+        self.blocked_stack = []
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
 
-        if self.blocked_depth:
-            if tag in BLOCKED_TAGS:
-                self.blocked_depth += 1
+        if self.blocked_stack:
+            if tag in BLOCKED_CONTENT_TAGS:
+                self.blocked_stack.append(tag)
             return
 
-        if tag in BLOCKED_TAGS:
-            self.blocked_depth = 1
+        if tag in BLOCKED_CONTENT_TAGS:
+            self.blocked_stack.append(tag)
+            return
+
+        if tag not in ALLOWED_TAGS:
             return
 
         safe_attributes = []
@@ -63,19 +60,8 @@ class WebsiteSanitizer(HTMLParser):
             if value is None:
                 continue
 
-            if name.startswith("on"):
+            if name not in ALLOWED_ATTRIBUTES:
                 continue
-
-            if name in {"style", "srcdoc"}:
-                continue
-
-            if name in ALLOWED_URL_ATTRIBUTES:
-                normalized = value.strip().lower()
-
-                if normalized.startswith(
-                    ("javascript:", "data:", "vbscript:")
-                ):
-                    continue
 
             safe_attributes.append(
                 f'{name}="{escape(value, quote=True)}"'
@@ -91,16 +77,16 @@ class WebsiteSanitizer(HTMLParser):
     def handle_endtag(self, tag):
         tag = tag.lower()
 
-        if self.blocked_depth:
-            if tag in BLOCKED_TAGS:
-                self.blocked_depth -= 1
+        if self.blocked_stack:
+            if tag == self.blocked_stack[-1]:
+                self.blocked_stack.pop()
             return
 
-        if tag not in VOID_TAGS and tag not in BLOCKED_TAGS:
+        if tag in ALLOWED_TAGS and tag not in VOID_TAGS:
             self.output.append(f"</{tag}>")
 
     def handle_data(self, data):
-        if not self.blocked_depth:
+        if not self.blocked_stack:
             self.output.append(escape(data))
 
     def get_html(self):
@@ -111,7 +97,7 @@ def create_safe_preview(html: str) -> str:
     if not isinstance(html, str):
         raise ValueError("HTML content must be a string.")
 
-    if len(html.encode("utf-8")) > 2 * 1024 * 1024:
+    if len(html.encode("utf-8")) > MAX_HTML_SIZE:
         raise ValueError("HTML preview exceeds the 2 MB limit.")
 
     sanitizer = WebsiteSanitizer()
