@@ -1,6 +1,9 @@
+
+from urllib.parse import urlsplit
+
 import qrcode
 
-from pathlib import Path
+from phishguard.config import REPORT_DIR
 
 
 def generate_qr_code(
@@ -8,32 +11,58 @@ def generate_qr_code(
     output_name: str,
 ) -> str:
 
-    if not tracking_url.startswith(("http://", "https://")):
-        raise ValueError("A valid HTTP or HTTPS URL is required.")
+    if not isinstance(tracking_url, str):
+        raise ValueError("Tracking URL must be text.")
 
-    if not output_name.isalnum():
-        raise ValueError("Output name must contain letters or numbers only.")
+    if not isinstance(output_name, str):
+        raise ValueError("Output name must be text.")
 
-    output_dir = Path("reports/qr_codes")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not output_name or not output_name.isascii() or not output_name.isalnum():
+        raise ValueError(
+            "Output name must contain only English letters and numbers."
+        )
 
-    output_path = output_dir / f"{output_name}.png"
+    try:
+        parsed_url = urlsplit(tracking_url)
 
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10,
-        border=4,
-    )
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+        ):
+            raise ValueError("A valid HTTP or HTTPS URL is required.")
 
-    qr.add_data(tracking_url)
-    qr.make(fit=True)
+        parsed_url.port
 
-    image = qr.make_image(
-        fill_color="black",
-        back_color="white",
-    )
+    except ValueError as error:
+        raise ValueError("Invalid tracking URL.") from error
 
-    image.save(output_path)
+    output_dir = REPORT_DIR / "qr_codes"
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        output_path = output_dir / f"{output_name}.png"
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+
+        qr.add_data(tracking_url)
+        qr.make(fit=True)
+
+        image = qr.make_image(
+            fill_color="black",
+            back_color="white",
+        )
+
+        image.save(output_path)
+
+    except OSError as error:
+        raise RuntimeError("Unable to generate QR code.") from error
 
     return str(output_path)
