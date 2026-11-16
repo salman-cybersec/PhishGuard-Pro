@@ -180,3 +180,114 @@ def sanitize_css(css: str) -> str:
 
     except (ValueError, TypeError, AttributeError) as error:
         raise ValueError("CSS sanitization failed.") from error
+
+
+import re
+
+
+SAFE_SELECTOR_PATTERN = re.compile(
+    r"^[a-zA-Z0-9_*#.\[\]=\"' :>+~\-"
+    r":()]+$"
+)
+
+
+def scope_css(
+    css: str,
+    scope: str = ".phishguard-preview",
+) -> str:
+    if not isinstance(css, str):
+        raise ValueError("CSS content must be text.")
+
+    if not isinstance(scope, str) or not re.fullmatch(
+        r"\.[a-zA-Z][a-zA-Z0-9_-]{0,63}",
+        scope,
+    ):
+        raise ValueError("Invalid CSS scope.")
+
+    if len(css.encode("utf-8")) > MAX_CSS_SIZE:
+        raise ValueError("CSS content exceeds the size limit.")
+
+    try:
+        rules = tinycss2.parse_stylesheet(
+            css,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+
+        scoped_rules = []
+
+        for rule in rules:
+            if rule.type != "qualified-rule":
+                continue
+
+            selector_text = tinycss2.serialize(
+                rule.prelude
+            ).strip()
+
+            selectors = [
+                item.strip()
+                for item in selector_text.split(",")
+            ]
+
+            if not selectors:
+                continue
+
+            if any(
+                not selector
+                or len(selector) > 300
+                or not SAFE_SELECTOR_PATTERN.fullmatch(selector)
+                for selector in selectors
+            ):
+                continue
+
+            declarations = tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+
+            safe_declarations = []
+
+            for declaration in declarations:
+                if declaration.type != "declaration":
+                    continue
+
+                if declaration.lower_name not in ALLOWED_PROPERTIES:
+                    continue
+
+                if declaration.important:
+                    continue
+
+                if _contains_unsafe_token(declaration.value):
+                    continue
+
+                value = tinycss2.serialize(
+                    declaration.value
+                ).strip()
+
+                if not value or len(value) > 500:
+                    continue
+
+                safe_declarations.append(
+                    f"{declaration.lower_name}: {value}"
+                )
+
+            if not safe_declarations:
+                continue
+
+            scoped_selectors = [
+                f"{scope} {selector}"
+                for selector in selectors
+            ]
+
+            scoped_rules.append(
+                ", ".join(scoped_selectors)
+                + " { "
+                + "; ".join(safe_declarations)
+                + "; }"
+            )
+
+        return "\n".join(scoped_rules)
+
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError("CSS scoping failed.") from error
