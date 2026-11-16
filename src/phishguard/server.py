@@ -1,14 +1,17 @@
 
+import re
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel, Field
 
 from phishguard.config import (
     APP_NAME,
     APP_VERSION,
     MAX_REQUEST_SIZE,
+    DATA_DIR,
 )
 from phishguard.database import initialize_database
 from phishguard.campaigns import create_campaign, list_campaigns
@@ -19,13 +22,35 @@ from phishguard.security import validate_input
 from phishguard.link_manager import get_tracking_link
 from phishguard.reporting import export_campaign_report
 from phishguard.auth import verify_api_key
-from phishguard.audit import write_audit_log, AUDIT_FILE, verify_audit_log
+from phishguard.audit import (
+    write_audit_log,
+    AUDIT_FILE,
+    verify_audit_log,
+)
 from phishguard.rate_limit import enforce_rate_limit
 from phishguard.request_limits import RequestSizeLimitMiddleware
 
 from phishguard.training_submission import router as training_router
 from phishguard.participant_reports import get_participant_report
 from phishguard.participant_export import export_participants_csv
+
+
+PREVIEW_DIR = DATA_DIR / "website_previews"
+ASSET_DIR = DATA_DIR / "website_assets"
+
+PREVIEW_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]{24}$"
+)
+
+ASSET_FILENAME_PATTERN = re.compile(
+    r"^[a-f0-9]{64}\.(?:png|jpg|webp)$"
+)
+
+ASSET_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 @asynccontextmanager
@@ -41,7 +66,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Register training submission endpoint
 app.include_router(training_router)
 
 app.add_middleware(
@@ -107,13 +131,19 @@ def health():
 def new_campaign(request: CampaignRequest):
     try:
         result = create_campaign(request.name)
+
         write_audit_log(
             "campaign_created",
             {"campaign_name": request.name},
         )
+
         return result
+
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
 
 
 @app.get("/api/campaigns", dependencies=[Depends(verify_api_key)])
@@ -125,16 +155,31 @@ def campaigns():
     "/api/campaigns/{campaign_id}/status",
     dependencies=[Depends(verify_api_key)],
 )
-def change_campaign_status(campaign_id: int, request: StatusRequest):
+def change_campaign_status(
+    campaign_id: int,
+    request: StatusRequest,
+):
     try:
-        result = update_campaign_status(campaign_id, request.status)
+        result = update_campaign_status(
+            campaign_id,
+            request.status,
+        )
+
         write_audit_log(
             "campaign_status_changed",
-            {"campaign_id": campaign_id, "status": request.status},
+            {
+                "campaign_id": campaign_id,
+                "status": request.status,
+            },
         )
+
         return result
+
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
 
 
 @app.get(
@@ -144,8 +189,12 @@ def change_campaign_status(campaign_id: int, request: StatusRequest):
 def campaign_analytics(campaign_id: int):
     try:
         return get_campaign_analytics(campaign_id)
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        )
 
 
 @app.post("/api/events", dependencies=[Depends(verify_api_key)])
@@ -156,8 +205,12 @@ def new_event(request: EventRequest):
             request.event_type,
             request.user_agent,
         )
+
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
 
 
 @app.post(
@@ -167,13 +220,19 @@ def new_event(request: EventRequest):
 def security_validation(request: InputRequest):
     try:
         result = validate_input(request.value)
+
         write_audit_log(
             "security_validation",
             {"result": "completed"},
         )
+
         return result
+
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
 
 
 @app.post("/api/tracking-link", dependencies=[Depends(verify_api_key)])
@@ -183,13 +242,19 @@ def create_tracking_link(request: LinkRequest):
             request.base_url,
             request.tracking_code,
         )
+
         write_audit_log(
             "tracking_link_created",
             {"status": "success"},
         )
+
         return {"tracking_link": link}
+
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(
+            status_code=400,
+            detail=str(error),
+        )
 
 
 @app.post(
@@ -199,8 +264,12 @@ def create_tracking_link(request: LinkRequest):
 def campaign_report(campaign_id: int):
     try:
         return export_campaign_report(campaign_id)
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        )
 
 
 @app.get(
@@ -210,8 +279,12 @@ def campaign_report(campaign_id: int):
 def participant_report(campaign_id: int):
     try:
         return get_participant_report(campaign_id)
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        )
 
 
 @app.get(
@@ -231,8 +304,12 @@ def export_participant_report(campaign_id: int):
                 )
             },
         )
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        )
 
 
 @app.post(
@@ -242,12 +319,20 @@ def export_participant_report(campaign_id: int):
 def campaign_qr(campaign_id: int):
     try:
         analytics = get_campaign_analytics(campaign_id)
+
         return {
             "campaign_id": analytics["campaign"]["id"],
-            "message": "An authorized training URL is required for QR generation.",
+            "message": (
+                "An authorized training URL is required "
+                "for QR generation."
+            ),
         }
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        )
 
 
 @app.get("/api/audit-logs", dependencies=[Depends(verify_api_key)])
@@ -262,9 +347,18 @@ def get_audit_logs(limit: int = 100):
         return {"logs": []}
 
     try:
-        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
-        logs = [line for line in lines[-limit:] if line.strip()]
+        lines = AUDIT_FILE.read_text(
+            encoding="utf-8"
+        ).splitlines()
+
+        logs = [
+            line
+            for line in lines[-limit:]
+            if line.strip()
+        ]
+
         return {"logs": logs}
+
     except OSError:
         raise HTTPException(
             status_code=500,
@@ -283,3 +377,119 @@ def verify_audit_integrity():
         "integrity": "valid" if is_valid else "tampered",
         "verified": is_valid,
     }
+
+
+@app.get("/preview/{preview_id}")
+def serve_website_preview(preview_id: str):
+    if not PREVIEW_ID_PATTERN.fullmatch(preview_id):
+        raise HTTPException(
+            status_code=404,
+            detail="Preview not found.",
+        )
+
+    try:
+        safe_directory = PREVIEW_DIR.resolve()
+        preview_path = (
+            safe_directory / f"{preview_id}.html"
+        ).resolve()
+
+        if preview_path.parent != safe_directory:
+            raise HTTPException(
+                status_code=404,
+                detail="Preview not found.",
+            )
+
+        if not preview_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="Preview not found.",
+            )
+
+        return FileResponse(
+            path=preview_path,
+            media_type="text/html",
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": (
+                    "default-src 'none'; "
+                    "img-src 'self'; "
+                    "style-src 'unsafe-inline'; "
+                    "script-src 'none'; "
+                    "connect-src 'none'; "
+                    "font-src 'none'; "
+                    "object-src 'none'; "
+                    "frame-src 'none'; "
+                    "base-uri 'none'; "
+                    "form-action 'none'; "
+                    "frame-ancestors 'none'; "
+                    "sandbox allow-same-origin"
+                ),
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except OSError:
+        raise HTTPException(
+            status_code=404,
+            detail="Preview not found.",
+        )
+
+
+@app.get("/assets/{filename}")
+def serve_website_asset(filename: str):
+    if not ASSET_FILENAME_PATTERN.fullmatch(filename):
+        raise HTTPException(
+            status_code=404,
+            detail="Asset not found.",
+        )
+
+    extension = Path(filename).suffix.lower()
+    content_type = ASSET_CONTENT_TYPES.get(extension)
+
+    if not content_type:
+        raise HTTPException(
+            status_code=404,
+            detail="Asset not found.",
+        )
+
+    try:
+        safe_directory = ASSET_DIR.resolve()
+        asset_path = (
+            safe_directory / filename
+        ).resolve()
+
+        if asset_path.parent != safe_directory:
+            raise HTTPException(
+                status_code=404,
+                detail="Asset not found.",
+            )
+
+        if not asset_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="Asset not found.",
+            )
+
+        return FileResponse(
+            path=asset_path,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    except HTTPException:
+        raise
+
+    except OSError:
+        raise HTTPException(
+            status_code=404,
+            detail="Asset not found.",
+        )
