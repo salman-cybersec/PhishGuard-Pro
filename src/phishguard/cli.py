@@ -8,6 +8,7 @@ from phishguard.banner import show_banner
 from phishguard.database import initialize_database
 from phishguard.campaigns import create_campaign, list_campaigns
 from phishguard.campaign_controls import update_campaign_status
+from phishguard.analytics import get_campaign_analytics
 
 
 console = Console()
@@ -107,6 +108,43 @@ def campaign_menu():
             console.print(f"[red]Application error: {error}[/red]")
 
 
+def analytics_menu():
+    campaign_id = Prompt.ask("Enter campaign ID")
+
+    try:
+        analytics = get_campaign_analytics(int(campaign_id))
+        campaign = analytics["campaign"]
+
+        table = Table(title="Simulation Analytics")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Result", style="green")
+
+        table.add_row("Campaign", campaign["name"])
+        table.add_row("Campaign Status", campaign["status"])
+        table.add_row("Total Events", str(analytics["total_events"]))
+        table.add_row("Page Visits", str(analytics["page_visits"]))
+        table.add_row(
+            "Training Page Views",
+            str(analytics["training_page_views"]),
+        )
+        table.add_row(
+            "Form Interactions",
+            str(analytics["form_interactions"]),
+        )
+        table.add_row("Completions", str(analytics["completions"]))
+        table.add_row(
+            "Completion Rate",
+            f"{analytics['completion_rate']}%",
+        )
+
+        console.print(table)
+
+    except ValueError as error:
+        console.print(f"[red]Error: {error}[/red]")
+    except RuntimeError as error:
+        console.print(f"[red]Application error: {error}[/red]")
+
+
 def main():
     initialize_database()
     show_banner()
@@ -122,13 +160,16 @@ def main():
         elif choice == "1":
             campaign_menu()
 
+        elif choice == "2":
+            analytics_menu()
+
         elif choice == "5":
             console.print(
                 "[cyan]PhishGuard Pro - Authorized Security Lab Toolkit[/cyan]"
             )
             console.print("[white]Developer: Salman Afzal[/white]")
 
-        elif choice in {"2", "3", "4"}:
+        elif choice in {"3", "4"}:
             console.print(
                 "[yellow]This module will be integrated in a future step.[/yellow]"
             )
