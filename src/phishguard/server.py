@@ -4,7 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 
-from phishguard.config import APP_NAME, APP_VERSION
+from phishguard.config import (
+    APP_NAME,
+    APP_VERSION,
+    MAX_REQUEST_SIZE,
+)
 from phishguard.database import initialize_database
 from phishguard.campaigns import create_campaign, list_campaigns
 from phishguard.campaign_controls import update_campaign_status
@@ -16,6 +20,7 @@ from phishguard.reporting import export_campaign_report
 from phishguard.auth import verify_api_key
 from phishguard.audit import write_audit_log, AUDIT_FILE, verify_audit_log
 from phishguard.rate_limit import enforce_rate_limit
+from phishguard.request_limits import RequestSizeLimitMiddleware
 
 
 @asynccontextmanager
@@ -29,6 +34,11 @@ app = FastAPI(
     version=APP_VERSION,
     description="Authorized security awareness lab API.",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    RequestSizeLimitMiddleware,
+    max_size=MAX_REQUEST_SIZE,
 )
 
 
