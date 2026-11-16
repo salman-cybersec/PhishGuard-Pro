@@ -1,10 +1,12 @@
 
+import ipaddress
 import secrets
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from phishguard.database import get_connection
+from phishguard.device_info import parse_device_info
 
 
 router = APIRouter()
@@ -40,12 +42,21 @@ def submit_training_form(
 
     client_ip = None
     user_agent = None
+    device_info = {}
 
     if collect_ip and request.client:
-        client_ip = request.client.host
+        try:
+            client_ip = str(
+                ipaddress.ip_address(request.client.host)
+            )
+        except ValueError:
+            client_ip = None
 
     if collect_device:
         user_agent = request.headers.get("user-agent", "")[:500] or None
+
+        if user_agent:
+            device_info = parse_device_info(user_agent)
 
     participant_token = secrets.token_urlsafe(32)
 
@@ -74,9 +85,13 @@ def submit_training_form(
                     consent_ip,
                     ip_address,
                     consent_device,
-                    user_agent
+                    user_agent,
+                    browser_name,
+                    browser_version,
+                    os_name,
+                    device_type
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     campaign_id,
@@ -86,6 +101,10 @@ def submit_training_form(
                     client_ip,
                     int(collect_device),
                     user_agent,
+                    device_info.get("browser_name"),
+                    device_info.get("browser_version"),
+                    device_info.get("os_name"),
+                    device_info.get("device_type"),
                 ),
             )
 
