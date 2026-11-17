@@ -1,7 +1,7 @@
 
 import pytest
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
 from fastapi.testclient import TestClient
 
 from phishguard.auth import (
@@ -112,14 +112,19 @@ def test_revoked_admin_session_is_rejected():
     ):
         return {"authenticated": authenticated}
 
+    @app.post("/logout")
+    def logout(request: Request):
+        revoke_admin_session(request)
+        return {"revoked": True}
+
     client = TestClient(app)
 
     token = create_admin_session()
     client.cookies.set(ADMIN_SESSION_COOKIE, token)
 
-    revoke_admin_session(
-        client.get("/protected").request
-    )
+    logout_response = client.post("/logout")
+
+    assert logout_response.status_code == 200
 
     response = client.get("/protected")
 
