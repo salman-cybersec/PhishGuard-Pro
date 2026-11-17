@@ -1,6 +1,4 @@
 
-import re
-
 from phishguard.config import DATABASE_BACKEND
 
 
@@ -131,13 +129,38 @@ ON events(campaign_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_events_participant
 ON events(participant_id);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
 def initialize_schema(connection):
-    if DATABASE_BACKEND == "postgresql":
-        connection.execute(POSTGRES_SCHEMA)
-    elif DATABASE_BACKEND == "sqlite":
+    if DATABASE_BACKEND == "sqlite":
         connection.executescript(SQLITE_SCHEMA)
-    else:
-        raise RuntimeError("Unsupported database backend.")
+        return
+
+    if DATABASE_BACKEND == "postgresql":
+        statements = [
+            statement.strip()
+            for statement in POSTGRES_SCHEMA.split(";")
+            if statement.strip()
+        ]
+
+        for statement in statements:
+            connection.execute(statement)
+
+        connection.execute(
+            """
+            INSERT INTO schema_version (version)
+            VALUES (%s)
+            ON CONFLICT (version) DO NOTHING
+            """,
+            (1,),
+        )
+
+        return
+
+    raise RuntimeError("Unsupported database backend.")
