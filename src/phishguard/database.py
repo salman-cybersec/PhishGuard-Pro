@@ -153,11 +153,9 @@ def initialize_database():
 
             CREATE INDEX IF NOT EXISTS idx_events_campaign_created
             ON events(campaign_id, created_at);
-
-            CREATE INDEX IF NOT EXISTS idx_events_participant
-            ON events(participant_id);
         """)
 
+        # Migrate existing databases before creating dependent indexes.
         _add_column_if_missing(
             connection,
             "events",
@@ -171,6 +169,11 @@ def initialize_database():
             "consent_activity",
             "INTEGER NOT NULL DEFAULT 0 CHECK(consent_activity IN (0,1))",
         )
+
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_participant
+            ON events(participant_id)
+        """)
 
         connection.execute(
             "PRAGMA user_version=3"
