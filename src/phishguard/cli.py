@@ -4,7 +4,7 @@ from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.table import Table
 
-from phishguard.banner import show_banner
+from phishguard.banner import show_banner, show_service_catalog
 from phishguard.database import initialize_database
 from phishguard.campaigns import create_campaign, list_campaigns
 from phishguard.campaign_controls import update_campaign_status
@@ -273,6 +273,7 @@ def website_import_menu():
 def main():
     initialize_database()
     show_banner()
+    show_service_catalog()
 
     while True:
         show_menu()
