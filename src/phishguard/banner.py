@@ -9,15 +9,18 @@ console = Console()
 
 
 def show_banner():
-    logo = Text()
-    logo.append("  ____  _     _     _    ____ _   _  __ _   ____  ____  \\n", style="bold cyan")
-    logo.append(" |  _ \\| |__ (_)___| |__ / ___| | | |/ _| | |  _ \\/ ___| \\n", style="bold cyan")
-    logo.append(" | |_) | '_ \\| / __| '_ \\ |  _| | | | |_| | | |_) \\___ \\ \\n", style="bold cyan")
-    logo.append(" |  __/| | | | \\__ \\ | | | |_| | |_| |  _| | |  __/ ___) |\\n", style="bold cyan")
-    logo.append(" |_|   |_| |_|_|___/_| |_|\\____|\\___/|_| |_| |_|   |____/ \\n", style="bold cyan")
-    logo.append("\\n        PRO  |  ADVANCED SECURITY AWARENESS TOOLKIT\\n", style="bold white")
-    logo.append("        Developer: Salman Afzal\\n", style="dim")
-    logo.append("        22+ Security Awareness Service Scenarios\\n", style="bold green")
+    logo = Text(
+        " ____  _     _ ____  _   _  __ _   ____  _   _  ____  ____  \n"
+        "|  _ \\| |__ (_) ___|| | | |/ _| | |  _ \\| | | |/ ___|/ ___| \n"
+        "| |_) | '_ \\| |\\___ \\| |_| | |_| | | |_) | | | |\\___ \\\\___ \\\n"
+        "|  __/| | | | | ___) |  _  |  _| | |  __/| |_| | ___) |___) |\n"
+        "|_|   |_| |_|_||____/|_| |_|_| |_| |_|    \\___/ |____/|____/ \n"
+        "\n"
+        "       ADVANCED SECURITY AWARENESS TOOLKIT\n"
+        "       Developer: Salman Afzal\n"
+        "       22 Supported Awareness Services\n",
+        style="bold cyan",
+    )
 
     console.print(
         Panel(
