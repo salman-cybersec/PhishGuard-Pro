@@ -91,6 +91,6 @@ def test_invalid_campaign_id():
         get_participant_report(0)
 
 
-def test_missing_campaign():
+def test_missing_campaign(test_database):
     with pytest.raises(ValueError):
         get_participant_report(999)
