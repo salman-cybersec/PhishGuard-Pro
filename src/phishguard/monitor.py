@@ -4,7 +4,7 @@ import logging
 import re
 
 
-LOGGER = logging.getLogger("phishguard.monitor")
+LOGGER = logging.getLogger("uvicorn.error")
 
 
 def _safe_label(value: str | None) -> str | None:
