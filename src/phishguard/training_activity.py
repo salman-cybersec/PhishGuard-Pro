@@ -118,32 +118,6 @@ def record_training_activity(
 
             event_id = cursor.lastrowid
 
-            log_training_event(
-                event_type=event_type,
-                campaign_id=campaign_id,
-                participant_name=participant["participant_name"],
-                ip_address=(
-                    participant["ip_address"]
-                    if participant["consent_ip"] == 1
-                    else None
-                ),
-                browser_name=(
-                    participant["browser_name"]
-                    if participant["consent_device"] == 1
-                    else None
-                ),
-                os_name=(
-                    participant["os_name"]
-                    if participant["consent_device"] == 1
-                    else None
-                ),
-                device_type=(
-                    participant["device_type"]
-                    if participant["consent_device"] == 1
-                    else None
-                ),
-            )
-
     except HTTPException:
         raise
 
@@ -152,6 +126,32 @@ def record_training_activity(
             status_code=500,
             detail="Unable to record training activity.",
         ) from error
+
+    log_training_event(
+        event_type=event_type,
+        campaign_id=campaign_id,
+        participant_name=participant["participant_name"],
+        ip_address=(
+            participant["ip_address"]
+            if participant["consent_ip"] == 1
+            else None
+        ),
+        browser_name=(
+            participant["browser_name"]
+            if participant["consent_device"] == 1
+            else None
+        ),
+        os_name=(
+            participant["os_name"]
+            if participant["consent_device"] == 1
+            else None
+        ),
+        device_type=(
+            participant["device_type"]
+            if participant["consent_device"] == 1
+            else None
+        ),
+    )
 
     return JSONResponse(
         status_code=201,
