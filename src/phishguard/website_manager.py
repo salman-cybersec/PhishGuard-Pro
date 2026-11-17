@@ -52,6 +52,34 @@ class AssetParser(HTMLParser):
             self.assets.append((tag, value))
 
 
+def _resolve_asset_url(base_url, reference):
+    if not isinstance(reference, str):
+        raise ValueError("Invalid asset reference")
+
+    reference = reference.strip()
+
+    if not reference:
+        raise ValueError("Empty asset reference")
+
+    try:
+        resolved = urljoin(base_url, reference)
+        parsed = urlsplit(resolved)
+
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in (None, 443)
+        ):
+            raise ValueError("Unsafe asset URL")
+
+        return resolved
+
+    except (ValueError, UnicodeError) as error:
+        raise ValueError("Invalid asset URL") from error
+
+
 def import_website(url: str) -> dict:
     if not isinstance(url, str):
         raise ValueError(
@@ -62,7 +90,7 @@ def import_website(url: str) -> dict:
         parsed = urlsplit(url)
 
         if (
-            parsed.scheme != "https"
+            parsed.scheme.lower() != "https"
             or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
@@ -105,16 +133,21 @@ def import_website(url: str) -> dict:
     )
 
     for tag, reference in selected_assets:
-        asset_url = urljoin(
-            url,
-            reference,
-        )
-
         try:
+            asset_url = _resolve_asset_url(
+                url,
+                reference,
+            )
+
             result = download_asset(
                 asset_url,
                 original_host,
             )
+
+            if not isinstance(result, dict):
+                raise ValueError(
+                    "Invalid asset download result"
+                )
 
             filename = result.get(
                 "filename",
