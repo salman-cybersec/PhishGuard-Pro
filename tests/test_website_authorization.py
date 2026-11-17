@@ -2,7 +2,6 @@
 import pytest
 
 from phishguard.website_authorization import (
-    get_allowed_domains,
     validate_website_authorization,
 )
 
@@ -28,9 +27,7 @@ def test_unapproved_domain_is_rejected(monkeypatch):
     )
 
     with pytest.raises(ValueError):
-        validate_website_authorization(
-            "https://unapproved.com"
-        )
+        validate_website_authorization("https://unapproved.com")
 
 
 def test_http_url_is_rejected(monkeypatch):
@@ -40,9 +37,7 @@ def test_http_url_is_rejected(monkeypatch):
     )
 
     with pytest.raises(ValueError):
-        validate_website_authorization(
-            "http://example.com"
-        )
+        validate_website_authorization("http://example.com")
 
 
 def test_url_with_credentials_is_rejected(monkeypatch):
@@ -87,8 +82,11 @@ def test_missing_domain_configuration_is_rejected(monkeypatch):
         raising=False,
     )
 
-    with pytest.raises(ValueError):
-        get_allowed_domains()
+    with pytest.raises(
+        ValueError,
+        match="No authorized website domains configured",
+    ):
+        validate_website_authorization("https://example.com")
 
 
 def test_invalid_hostname_is_rejected(monkeypatch):
