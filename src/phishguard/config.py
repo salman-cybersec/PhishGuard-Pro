@@ -1,10 +1,15 @@
-
 import os
 import re
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# Load private local settings before reading any PHISHGUARD_* variables.
+# The .env file is ignored by Git and must never contain committed secrets.
+load_dotenv(PROJECT_ROOT / ".env")
 
 DATA_DIR = PROJECT_ROOT / "data"
 REPORT_DIR = PROJECT_ROOT / "reports"
