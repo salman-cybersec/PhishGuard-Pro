@@ -7,7 +7,7 @@ from phishguard.config import DATA_DIR
 
 DATABASE_PATH = DATA_DIR / "phishguard.db"
 DATABASE_TIMEOUT = 10
-DATABASE_VERSION = 2
+DATABASE_VERSION = 3
 
 
 @contextmanager
@@ -68,12 +68,9 @@ def initialize_database():
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS campaigns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 name TEXT NOT NULL
                     CHECK(length(name) BETWEEN 1 AND 100),
-
                 tracking_code TEXT NOT NULL UNIQUE,
-
                 status TEXT NOT NULL DEFAULT 'draft'
                     CHECK(status IN (
                         'draft',
@@ -81,50 +78,36 @@ def initialize_database():
                         'paused',
                         'completed'
                     )),
-
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS participants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 campaign_id INTEGER NOT NULL,
-
                 participant_token TEXT NOT NULL
                     CHECK(length(participant_token) BETWEEN 20 AND 100),
-
                 participant_name TEXT NOT NULL
                     CHECK(length(participant_name) BETWEEN 1 AND 100),
-
                 submitted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
                 consent_ip INTEGER NOT NULL DEFAULT 0
                     CHECK(consent_ip IN (0, 1)),
-
                 ip_address TEXT
                     CHECK(ip_address IS NULL OR length(ip_address) <= 45),
 
                 consent_device INTEGER NOT NULL DEFAULT 0
                     CHECK(consent_device IN (0, 1)),
-
                 user_agent TEXT
                     CHECK(user_agent IS NULL OR length(user_agent) <= 500),
-
                 browser_name TEXT
                     CHECK(browser_name IS NULL OR length(browser_name) <= 100),
-
                 browser_version TEXT
                     CHECK(browser_version IS NULL OR length(browser_version) <= 50),
-
                 os_name TEXT
                     CHECK(os_name IS NULL OR length(os_name) <= 100),
-
                 device_type TEXT
                     CHECK(device_type IS NULL OR device_type IN (
-                        'desktop',
-                        'mobile',
-                        'tablet',
-                        'unknown'
+                        'desktop', 'mobile', 'tablet', 'unknown'
                     )),
 
                 FOREIGN KEY (campaign_id)
@@ -133,9 +116,7 @@ def initialize_database():
 
                 UNIQUE (campaign_id, participant_token),
 
-                CHECK (
-                    consent_ip = 1 OR ip_address IS NULL
-                ),
+                CHECK (consent_ip = 1 OR ip_address IS NULL),
 
                 CHECK (
                     consent_device = 1 OR (
@@ -150,9 +131,7 @@ def initialize_database():
 
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 campaign_id INTEGER NOT NULL,
-
                 event_type TEXT NOT NULL
                     CHECK(event_type IN (
                         'page_visit',
@@ -160,12 +139,9 @@ def initialize_database():
                         'form_interaction',
                         'simulation_complete'
                     )),
-
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
                 user_agent TEXT
                     CHECK(user_agent IS NULL OR length(user_agent) <= 500),
-
                 participant_id INTEGER,
 
                 FOREIGN KEY (campaign_id)
@@ -190,8 +166,7 @@ def initialize_database():
             ON participants(participant_token);
         """)
 
-        # Migration for existing databases.
-        # Existing event records remain intact.
+        # Safe migrations for existing databases.
         _add_column_if_missing(
             connection,
             "events",
@@ -199,7 +174,13 @@ def initialize_database():
             "INTEGER REFERENCES participants(id) ON DELETE SET NULL",
         )
 
-        # Indexes for participant-specific activity queries.
+        _add_column_if_missing(
+            connection,
+            "participants",
+            "consent_activity",
+            "INTEGER NOT NULL DEFAULT 0 CHECK(consent_activity IN (0, 1))",
+        )
+
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_participant
             ON events(participant_id)
@@ -213,6 +194,11 @@ def initialize_database():
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_campaign_participant
             ON events(campaign_id, participant_id)
+        """)
+
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_participants_activity_consent
+            ON participants(campaign_id, consent_activity)
         """)
 
         connection.execute(
@@ -250,10 +236,7 @@ if __name__ == "__main__":
     initialize_database()
 
     print("Database initialized.")
-
-    print(
-        f"Database version: {get_database_version()}"
-    )
+    print(f"Database version: {get_database_version()}")
 
     if verify_database_integrity():
         print("Database integrity verified.")
