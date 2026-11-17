@@ -13,6 +13,7 @@ from phishguard.website_authorization import (
     validate_website_authorization,
 )
 from phishguard.website_manager import import_website
+from phishguard.config import build_preview_url
 
 
 console = Console()
@@ -175,19 +176,13 @@ def website_import_menu():
                 "Only HTTPS websites explicitly configured in "
                 "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS can be imported."
             )
-            console.print(
-                "Imported JavaScript is never executed."
-            )
-            console.print(
-                "HTML and CSS are sanitized before local preview."
-            )
+            console.print("Imported JavaScript is never executed.")
+            console.print("HTML and CSS are sanitized before local preview.")
             console.print(
                 "Real passwords and authentication credentials "
                 "are not collected."
             )
-            console.print(
-                "Only authorized websites should be used."
-            )
+            console.print("Only authorized websites should be used.")
 
         elif choice == "1":
             try:
@@ -208,6 +203,9 @@ def website_import_menu():
                 )
 
                 result = import_website(url)
+                preview_url = build_preview_url(
+                    result["preview_id"]
+                )
 
                 table = Table(title="Website Import Result")
                 table.add_column("Metric", style="cyan")
@@ -215,14 +213,8 @@ def website_import_menu():
 
                 table.add_row("Website", result["website"])
                 table.add_row("Status", result["status"])
-                table.add_row(
-                    "Preview ID",
-                    result["preview_id"],
-                )
-                table.add_row(
-                    "Preview Type",
-                    result["preview_type"],
-                )
+                table.add_row("Preview ID", result["preview_id"])
+                table.add_row("Preview Type", result["preview_type"])
                 table.add_row(
                     "Assets Found",
                     str(result["assets_found"]),
@@ -257,14 +249,12 @@ def website_import_menu():
                 console.print(
                     "[green]Sanitized website preview saved successfully.[/green]"
                 )
-
                 console.print(
-                    f"Preview ID: {result['preview_id']}"
+                    f"[bold cyan]Local Preview URL:[/bold cyan] {preview_url}"
                 )
-
                 console.print(
-                    "[yellow]Start the authorized local server to "
-                    "open the preview route.[/yellow]"
+                    "[yellow]The local PhishGuard server must be running "
+                    "before opening this URL.[/yellow]"
                 )
 
             except ValueError as error:
