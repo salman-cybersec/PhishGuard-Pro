@@ -1,10 +1,14 @@
 
 from html import escape
 
+from phishguard.awareness_templates import get_template
+
 
 def render_training_page(
     campaign_name: str,
     campaign_id: int,
+    service_id: str | None = None,
+    scenario_id: str | None = None,
 ) -> str:
     if not isinstance(campaign_id, int) or campaign_id <= 0:
         raise ValueError("Invalid campaign ID.")
@@ -15,9 +19,35 @@ def render_training_page(
     campaign_name = campaign_name.strip()
 
     if not campaign_name or len(campaign_name) > 100:
-        raise ValueError("Campaign name must contain 1-100 characters.")
+        raise ValueError(
+            "Campaign name must contain 1-100 characters."
+        )
+
+    if (service_id is None) != (scenario_id is None):
+        raise ValueError(
+            "Service and scenario must be provided together."
+        )
 
     safe_name = escape(campaign_name)
+
+    awareness_section = ""
+
+    if service_id is not None:
+        template = get_template(service_id, scenario_id)
+
+        safe_service = escape(template["service_name"])
+        safe_title = escape(template["title"])
+        safe_message = escape(template["message"])
+        safe_action = escape(template["action"])
+
+        awareness_section = f"""
+        <section class="awareness">
+            <p class="service">{safe_service} awareness scenario</p>
+            <h3>{safe_title}</h3>
+            <p>{safe_message}</p>
+            <p class="action-label">{safe_action}</p>
+        </section>
+        """
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -47,6 +77,18 @@ def render_training_page(
             border-left: 4px solid #2673d9;
             margin-bottom: 22px;
             line-height: 1.5;
+        }}
+        .awareness {{
+            padding: 16px;
+            margin: 18px 0;
+            background: #f8fafc;
+            border: 1px solid #dce3ec;
+            border-radius: 8px;
+            line-height: 1.6;
+        }}
+        .service, .action-label {{
+            color: #52647a;
+            font-size: 13px;
         }}
         label {{
             display: block;
@@ -84,11 +126,13 @@ def render_training_page(
 
         <div class="notice">
             This is an authorized security-awareness simulation.
-            No real passwords are requested or collected.
-            Please review the data collection choices below.
+            No real passwords or verification codes are requested
+            or collected. Review the data collection choices below.
         </div>
 
         <h3>{safe_name}</h3>
+
+        {awareness_section}
 
         <form method="post" action="/training/submit">
             <input type="hidden"
@@ -115,7 +159,10 @@ def render_training_page(
 
             <label class="consent">
                 <input type="checkbox" name="consent_device" value="yes">
-                <span>I consent to collection of my browser and device information.</span>
+                <span>
+                    I consent to collection of my browser and device
+                    information.
+                </span>
             </label>
 
             <button type="submit">Continue</button>
