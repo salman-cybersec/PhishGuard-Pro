@@ -1,22 +1,184 @@
 
 from html import escape
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from phishguard.database import get_connection
 from phishguard.analytics import get_campaign_analytics
 from phishguard.participant_reports import get_participant_report
+from phishguard.auth import (
+    ADMIN_SESSION_COOKIE,
+    ADMIN_SESSION_MAX_AGE,
+    verify_admin_credentials,
+    create_admin_session,
+    verify_admin_session,
+    revoke_admin_session,
+)
 
 
 router = APIRouter()
 
 
-def _format_number(value):
-    return escape(str(value if value is not None else 0))
+def _login_page(message=""):
+    safe_message = escape(message)
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>PhishGuard Pro - Admin Login</title>
+        <style>
+            * {{ box-sizing: border-box; }}
+            body {{
+                margin: 0;
+                min-height: 100vh;
+                display: grid;
+                place-items: center;
+                background: #f4f6f9;
+                font-family: Arial, sans-serif;
+                color: #202938;
+                padding: 20px;
+            }}
+            .login {{
+                width: 100%;
+                max-width: 400px;
+                background: white;
+                padding: 30px;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+            }}
+            h1 {{ margin-top: 0; }}
+            p {{ color: #64748b; }}
+            label {{
+                display: block;
+                margin: 20px 0 8px;
+                font-weight: bold;
+            }}
+            input {{
+                width: 100%;
+                padding: 12px;
+                border: 1px solid #cbd5e1;
+                border-radius: 7px;
+                font-size: 16px;
+            }}
+            button {{
+                width: 100%;
+                margin-top: 20px;
+                padding: 13px;
+                border: 0;
+                border-radius: 7px;
+                background: #1e40af;
+                color: white;
+                font-size: 16px;
+                cursor: pointer;
+            }}
+            .error {{
+                color: #b91c1c;
+                font-size: 14px;
+            }}
+        </style>
+    </head>
+    <body>
+        <main class="login">
+            <h1>PhishGuard Pro</h1>
+            <p>Authorized administrator login</p>
+            <p class="error">{safe_message}</p>
+            <form method="post" action="/admin/login">
+                <label for="password">Admin password</label>
+                <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    maxlength="1024"
+                    autocomplete="current-password"
+                    required
+                >
+                <button type="submit">Sign in</button>
+            </form>
+        </main>
+    </body>
+    </html>
+    """
 
 
-@router.get("/admin/dashboard", response_class=HTMLResponse)
+@router.get("/admin/login", response_class=HTMLResponse)
+def admin_login_page():
+    return HTMLResponse(
+        content=_login_page(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/admin/login", response_class=HTMLResponse)
+def admin_login(
+    request: Request,
+    password: str = Form(..., max_length=1024),
+):
+    try:
+        valid_credentials = verify_admin_credentials(password)
+    except HTTPException:
+        raise
+
+    if not valid_credentials:
+        return HTMLResponse(
+            content=_login_page("Invalid username or password."),
+            status_code=401,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    token = create_admin_session()
+
+    response = RedirectResponse(
+        url="/admin/dashboard",
+        status_code=303,
+    )
+
+    response.set_cookie(
+        key=ADMIN_SESSION_COOKIE,
+        value=token,
+        max_age=ADMIN_SESSION_MAX_AGE,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+        path="/admin",
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+
+    return response
+
+
+@router.post("/admin/logout")
+def admin_logout(request: Request):
+    verify_admin_session(request)
+    revoke_admin_session(request)
+
+    response = RedirectResponse(
+        url="/admin/login",
+        status_code=303,
+    )
+
+    response.delete_cookie(
+        key=ADMIN_SESSION_COOKIE,
+        path="/admin",
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+
+    return response
+
+
+@router.get(
+    "/admin/dashboard",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
 def admin_dashboard():
     with get_connection() as connection:
         campaigns = connection.execute(
@@ -39,17 +201,23 @@ def admin_dashboard():
             continue
 
         participants = report["participants"]
-
         recent_rows = []
 
         for participant in participants[:5]:
+            if participant["completed"]:
+                participant_status = "Completed"
+            elif participant["consent_activity"]:
+                participant_status = "In progress"
+            else:
+                participant_status = "Not tracked"
+
             recent_rows.append(
                 f"""
                 <tr>
                     <td>{escape(participant["participant_name"])}</td>
                     <td>{escape(str(participant["submitted_at"]))}</td>
-                    <td>{_format_number(participant["total_events"])}</td>
-                    <td>{escape(participant["completion_status"] if "completion_status" in participant else ("Completed" if participant["completed"] else "In progress" if participant["consent_activity"] else "Not tracked"))}</td>
+                    <td>{escape(str(participant["total_events"]))}</td>
+                    <td>{escape(participant_status)}</td>
                 </tr>
                 """
             )
@@ -71,27 +239,27 @@ def admin_dashboard():
                 <div class="metrics">
                     <div class="metric">
                         <span>Total participants</span>
-                        <strong>{_format_number(analytics["total_participants"])}</strong>
+                        <strong>{analytics["total_participants"]}</strong>
                     </div>
                     <div class="metric">
                         <span>Activity consent</span>
-                        <strong>{_format_number(analytics["activity_consent_participants"])}</strong>
+                        <strong>{analytics["activity_consent_participants"]}</strong>
                     </div>
                     <div class="metric">
                         <span>Training views</span>
-                        <strong>{_format_number(analytics["training_page_views"])}</strong>
+                        <strong>{analytics["training_page_views"]}</strong>
                     </div>
                     <div class="metric">
                         <span>Interactions</span>
-                        <strong>{_format_number(analytics["form_interactions"])}</strong>
+                        <strong>{analytics["form_interactions"]}</strong>
                     </div>
                     <div class="metric">
                         <span>Completed participants</span>
-                        <strong>{_format_number(analytics["completed_participants"])}</strong>
+                        <strong>{analytics["completed_participants"]}</strong>
                     </div>
                     <div class="metric">
                         <span>Completion rate</span>
-                        <strong>{_format_number(analytics["completion_rate"])}%</strong>
+                        <strong>{analytics["completion_rate"]}%</strong>
                     </div>
                 </div>
 
@@ -135,10 +303,7 @@ def admin_dashboard():
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>PhishGuard Pro - Admin Dashboard</title>
         <style>
-            * {{
-                box-sizing: border-box;
-            }}
-
+            * {{ box-sizing: border-box; }}
             body {{
                 margin: 0;
                 padding: 30px;
@@ -146,25 +311,17 @@ def admin_dashboard():
                 color: #202938;
                 font-family: Arial, sans-serif;
             }}
-
             header {{
                 max-width: 1100px;
                 margin: 0 auto 25px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 15px;
             }}
-
-            h1 {{
-                margin-bottom: 8px;
-            }}
-
-            .subtitle {{
-                color: #64748b;
-            }}
-
-            main {{
-                max-width: 1100px;
-                margin: auto;
-            }}
-
+            h1 {{ margin-bottom: 8px; }}
+            .subtitle, .status, .last-activity {{ color: #64748b; }}
+            main {{ max-width: 1100px; margin: auto; }}
             .campaign {{
                 background: white;
                 border: 1px solid #e2e8f0;
@@ -172,79 +329,65 @@ def admin_dashboard():
                 padding: 22px;
                 margin-bottom: 24px;
             }}
-
-            .status,
-            .last-activity {{
-                color: #64748b;
-                font-size: 14px;
-            }}
-
             .metrics {{
                 display: grid;
                 grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
                 gap: 12px;
                 margin: 22px 0;
             }}
-
             .metric {{
                 padding: 17px;
                 background: #f8fafc;
                 border: 1px solid #e2e8f0;
                 border-radius: 9px;
             }}
-
             .metric span {{
                 display: block;
                 color: #64748b;
                 font-size: 13px;
                 margin-bottom: 10px;
             }}
-
-            .metric strong {{
-                font-size: 24px;
-            }}
-
-            .table-wrap {{
-                overflow-x: auto;
-            }}
-
+            .metric strong {{ font-size: 24px; }}
+            .table-wrap {{ overflow-x: auto; }}
             table {{
                 width: 100%;
                 border-collapse: collapse;
                 margin-top: 12px;
                 font-size: 14px;
             }}
-
-            th,
-            td {{
+            th, td {{
                 text-align: left;
                 padding: 12px;
                 border-bottom: 1px solid #e2e8f0;
             }}
-
-            th {{
-                background: #f8fafc;
+            th {{ background: #f8fafc; }}
+            .logout button {{
+                padding: 10px 16px;
+                border: 0;
+                border-radius: 7px;
+                background: #1e40af;
+                color: white;
+                cursor: pointer;
             }}
-
             @media (max-width: 600px) {{
-                body {{
-                    padding: 15px;
-                }}
-
-                .campaign {{
-                    padding: 15px;
-                }}
+                body {{ padding: 15px; }}
+                .campaign {{ padding: 15px; }}
+                header {{ align-items: flex-start; }}
             }}
         </style>
     </head>
     <body>
         <header>
-            <h1>PhishGuard Pro</h1>
-            <p class="subtitle">
-                Security Awareness Campaign Dashboard
-            </p>
+            <div>
+                <h1>PhishGuard Pro</h1>
+                <p class="subtitle">
+                    Security Awareness Campaign Dashboard
+                </p>
+            </div>
+            <form class="logout" method="post" action="/admin/logout">
+                <button type="submit">Log out</button>
+            </form>
         </header>
-
         <main>
             {content}
         </main>
