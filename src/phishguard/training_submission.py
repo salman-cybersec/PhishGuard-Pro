@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from phishguard.database import get_connection
 from phishguard.device_info import parse_device_info
+from phishguard.monitor import log_training_event
 
 
 router = APIRouter()
@@ -120,6 +121,20 @@ def submit_training_form(
             )
 
             participant_id = cursor.lastrowid
+
+            log_training_event(
+                event_type="participant_registered",
+                campaign_id=campaign_id,
+                participant_name=name,
+                ip_address=client_ip if collect_ip else None,
+                browser_name=(
+                    device_info.get("browser_name") if collect_device else None
+                ),
+                os_name=device_info.get("os_name") if collect_device else None,
+                device_type=(
+                    device_info.get("device_type") if collect_device else None
+                ),
+            )
 
             if collect_activity:
                 connection.execute(
