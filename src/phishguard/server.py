@@ -33,6 +33,8 @@ from phishguard.request_limits import RequestSizeLimitMiddleware
 
 from phishguard.training_submission import router as training_router
 from phishguard.training_routes import router as training_page_router
+from phishguard.training_activity import router as training_activity_router
+
 from phishguard.participant_reports import get_participant_report
 from phishguard.participant_export import export_participants_csv
 
@@ -71,6 +73,7 @@ app = FastAPI(
 
 app.include_router(training_router)
 app.include_router(training_page_router)
+app.include_router(training_activity_router)
 
 app.add_middleware(
     RequestSizeLimitMiddleware,
