@@ -143,6 +143,28 @@ SERVICES = {
             "gaming_security",
         ],
     },
+    "zoom": {
+        "name": "Zoom",
+        "scenarios": [
+            "account_security",
+            "verification_awareness",
+        ],
+    },
+    "dropbox": {
+        "name": "Dropbox",
+        "scenarios": [
+            "account_security",
+            "account_recovery_awareness",
+        ],
+    },
+    "github": {
+        "name": "GitHub",
+        "scenarios": [
+            "account_security",
+            "verification_awareness",
+        ],
+    },
+
 }
 
 
