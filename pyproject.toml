@@ -1,3 +1,4 @@
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -5,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "phishguard-pro"
 version = "0.1.0"
-description = "Advanced phishing awareness simulation and authorized security testing toolkit."
+description = "Security awareness simulation and authorized security testing toolkit."
 authors = [
     {name = "Salman Afzal"}
 ]
@@ -16,7 +17,8 @@ dependencies = [
     "rich>=13.9.0",
     "jinja2>=3.1.4",
     "python-multipart>=0.0.12",
-    "pydantic>=2.9.0"
+    "pydantic>=2.9.0",
+    "tinycss2>=1.4.0"
 ]
 
 [project.optional-dependencies]
