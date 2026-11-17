@@ -9,6 +9,10 @@ from phishguard.database import initialize_database
 from phishguard.campaigns import create_campaign, list_campaigns
 from phishguard.campaign_controls import update_campaign_status
 from phishguard.analytics import get_campaign_analytics
+from phishguard.website_authorization import (
+    validate_website_authorization,
+)
+from phishguard.website_manager import import_website
 
 
 console = Console()
@@ -22,6 +26,7 @@ def show_menu():
             "[bold cyan]3.[/bold cyan] Security Testing\n"
             "[bold cyan]4.[/bold cyan] Generate Reports\n"
             "[bold cyan]5.[/bold cyan] Project Information\n"
+            "[bold cyan]6.[/bold cyan] Website Import & Preview\n"
             "[bold red]0.[/bold red] Exit",
             title="[bold white]MAIN MENU[/bold white]",
             border_style="bright_blue",
@@ -145,6 +150,136 @@ def analytics_menu():
         console.print(f"[red]Application error: {error}[/red]")
 
 
+def website_import_menu():
+    while True:
+        console.print(
+            Panel(
+                "[bold cyan]1.[/bold cyan] Import Authorized Website\n"
+                "[bold cyan]2.[/bold cyan] Website Import Information\n"
+                "[bold red]0.[/bold red] Back",
+                title="[bold white]WEBSITE IMPORT & PREVIEW[/bold white]",
+                border_style="bright_blue",
+            )
+        )
+
+        choice = Prompt.ask("Select an option")
+
+        if choice == "0":
+            break
+
+        elif choice == "2":
+            console.print(
+                "[cyan]Website Import Security Information[/cyan]"
+            )
+            console.print(
+                "Only HTTPS websites explicitly configured in "
+                "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS can be imported."
+            )
+            console.print(
+                "Imported JavaScript is never executed."
+            )
+            console.print(
+                "HTML and CSS are sanitized before local preview."
+            )
+            console.print(
+                "Real passwords and authentication credentials "
+                "are not collected."
+            )
+            console.print(
+                "Only authorized websites should be used."
+            )
+
+        elif choice == "1":
+            try:
+                url = Prompt.ask(
+                    "Enter your authorized website HTTPS URL"
+                )
+
+                authorization = validate_website_authorization(url)
+
+                if not authorization["authorized"]:
+                    console.print(
+                        "[red]Website authorization failed.[/red]"
+                    )
+                    continue
+
+                console.print(
+                    "[green]Website domain authorization approved.[/green]"
+                )
+
+                result = import_website(url)
+
+                table = Table(title="Website Import Result")
+                table.add_column("Metric", style="cyan")
+                table.add_column("Result", style="green")
+
+                table.add_row("Website", result["website"])
+                table.add_row("Status", result["status"])
+                table.add_row(
+                    "Preview ID",
+                    result["preview_id"],
+                )
+                table.add_row(
+                    "Preview Type",
+                    result["preview_type"],
+                )
+                table.add_row(
+                    "Assets Found",
+                    str(result["assets_found"]),
+                )
+                table.add_row(
+                    "Assets Imported",
+                    str(result["assets_imported"]),
+                )
+                table.add_row(
+                    "Assets Skipped",
+                    str(result["assets_skipped"]),
+                )
+                table.add_row(
+                    "Images Connected",
+                    str(result["images_connected"]),
+                )
+                table.add_row(
+                    "Stylesheets Connected",
+                    str(result["stylesheets_connected"]),
+                )
+                table.add_row(
+                    "JavaScript Executed",
+                    str(result["javascript_executed"]),
+                )
+                table.add_row(
+                    "Credentials Collected",
+                    str(result["credentials_collected"]),
+                )
+
+                console.print(table)
+
+                console.print(
+                    "[green]Sanitized website preview saved successfully.[/green]"
+                )
+
+                console.print(
+                    f"Preview ID: {result['preview_id']}"
+                )
+
+                console.print(
+                    "[yellow]Start the authorized local server to "
+                    "open the preview route.[/yellow]"
+                )
+
+            except ValueError as error:
+                console.print(
+                    f"[red]Validation error: {error}[/red]"
+                )
+            except RuntimeError as error:
+                console.print(
+                    f"[red]Import error: {error}[/red]"
+                )
+
+        else:
+            console.print("[red]Invalid option.[/red]")
+
+
 def main():
     initialize_database()
     show_banner()
@@ -168,6 +303,9 @@ def main():
                 "[cyan]PhishGuard Pro - Authorized Security Lab Toolkit[/cyan]"
             )
             console.print("[white]Developer: Salman Afzal[/white]")
+
+        elif choice == "6":
+            website_import_menu()
 
         elif choice in {"3", "4"}:
             console.print(
