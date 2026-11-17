@@ -32,6 +32,7 @@ from phishguard.rate_limit import enforce_rate_limit
 from phishguard.request_limits import RequestSizeLimitMiddleware
 
 from phishguard.training_submission import router as training_router
+from phishguard.training_routes import router as training_page_router
 from phishguard.participant_reports import get_participant_report
 from phishguard.participant_export import export_participants_csv
 
@@ -69,6 +70,7 @@ app = FastAPI(
 )
 
 app.include_router(training_router)
+app.include_router(training_page_router)
 
 app.add_middleware(
     RequestSizeLimitMiddleware,
@@ -477,8 +479,6 @@ def serve_website_asset(filename: str):
                 detail="Asset not found.",
             )
 
-        # Confirm that the stored asset matches its
-        # content-addressed SHA-256 filename.
         digest = hashlib.sha256(
             asset_path.read_bytes()
         ).hexdigest()
