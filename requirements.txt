@@ -1,4 +1,3 @@
-
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 rich>=13.9.0
@@ -10,6 +9,7 @@ httpx>=0.27.0
 qrcode[pil]>=8.0
 requests>=2.32.3
 tinycss2>=1.4.0
+python-dotenv>=1.0.1
 
 # PostgreSQL database driver
 psycopg[binary]>=3.2.3
