@@ -5,10 +5,15 @@ from urllib.parse import urlsplit, urlunsplit
 from phishguard.database import get_connection
 
 
-TRACKING_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{20,100}$")
+TRACKING_CODE_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]{20,100}$"
+)
 
 
-def get_tracking_link(base_url: str, tracking_code: str) -> str:
+def get_tracking_link(
+    base_url: str,
+    tracking_code: str,
+) -> str:
 
     if not isinstance(base_url, str):
         raise ValueError("Base URL must be text.")
@@ -32,18 +37,32 @@ def get_tracking_link(base_url: str, tracking_code: str) -> str:
         ):
             raise ValueError("Invalid base URL.")
 
+        hostname = parsed_url.hostname.lower()
+
+        if any(
+            character.isspace()
+            for character in base_url
+        ):
+            raise ValueError("Invalid URL whitespace.")
+
         parsed_url.port
 
     except ValueError as error:
-        raise ValueError("A valid authorized HTTP or HTTPS base URL is required.") from error
+        raise ValueError(
+            "A valid authorized HTTP or HTTPS base URL is required."
+        ) from error
 
-    if parsed_url.scheme == "http" and parsed_url.hostname not in {
+    if parsed_url.scheme == "http" and hostname not in {
         "127.0.0.1",
         "localhost",
+        "::1",
     }:
-        raise ValueError("HTTP is only allowed for localhost testing.")
+        raise ValueError(
+            "HTTP is only allowed for localhost testing."
+        )
 
     with get_connection() as connection:
+
         campaign = connection.execute(
             """
             SELECT tracking_code, status
@@ -59,12 +78,18 @@ def get_tracking_link(base_url: str, tracking_code: str) -> str:
     if campaign["status"] != "active":
         raise ValueError("Campaign is not active.")
 
-    normalized_path = parsed_url.path.rstrip("/") + "/"
+    normalized_path = parsed_url.path.rstrip("/")
+
+    training_path = (
+        normalized_path
+        + "/training/"
+        + tracking_code
+    )
 
     return urlunsplit((
         parsed_url.scheme,
         parsed_url.netloc,
-        normalized_path + f"training/{tracking_code}",
+        training_path,
         "",
         "",
     ))
