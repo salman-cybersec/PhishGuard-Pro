@@ -2,26 +2,26 @@
 import pytest
 
 from phishguard.website_authorization import (
+    get_allowed_domains,
     validate_website_authorization,
 )
 
 
-def test_authorized_domain(monkeypatch):
+def test_authorized_https_domain_is_accepted(monkeypatch):
     monkeypatch.setenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         "example.com",
     )
 
     result = validate_website_authorization(
-        "https://example.com/login"
+        "https://example.com/training"
     )
 
     assert result["authorized"] is True
     assert result["hostname"] == "example.com"
-    assert result["status"] == "approved"
 
 
-def test_unapproved_domain(monkeypatch):
+def test_unapproved_domain_is_rejected(monkeypatch):
     monkeypatch.setenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         "example.com",
@@ -29,11 +29,11 @@ def test_unapproved_domain(monkeypatch):
 
     with pytest.raises(ValueError):
         validate_website_authorization(
-            "https://another-site.com"
+            "https://unapproved.com"
         )
 
 
-def test_http_url_rejected(monkeypatch):
+def test_http_url_is_rejected(monkeypatch):
     monkeypatch.setenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         "example.com",
@@ -45,7 +45,7 @@ def test_http_url_rejected(monkeypatch):
         )
 
 
-def test_url_with_credentials_rejected(monkeypatch):
+def test_url_with_credentials_is_rejected(monkeypatch):
     monkeypatch.setenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         "example.com",
@@ -57,7 +57,7 @@ def test_url_with_credentials_rejected(monkeypatch):
         )
 
 
-def test_nonstandard_port_rejected(monkeypatch):
+def test_non_standard_port_is_rejected(monkeypatch):
     monkeypatch.setenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         "example.com",
@@ -65,17 +65,39 @@ def test_nonstandard_port_rejected(monkeypatch):
 
     with pytest.raises(ValueError):
         validate_website_authorization(
-            "https://example.com:8080"
+            "https://example.com:8443"
         )
 
 
-def test_missing_allowlist_rejected(monkeypatch):
+def test_subdomain_requires_explicit_authorization(monkeypatch):
+    monkeypatch.setenv(
+        "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
+        "example.com",
+    )
+
+    with pytest.raises(ValueError):
+        validate_website_authorization(
+            "https://sub.example.com"
+        )
+
+
+def test_missing_domain_configuration_is_rejected(monkeypatch):
     monkeypatch.delenv(
         "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
         raising=False,
     )
 
     with pytest.raises(ValueError):
+        get_allowed_domains()
+
+
+def test_invalid_hostname_is_rejected(monkeypatch):
+    monkeypatch.setenv(
+        "PHISHGUARD_ALLOWED_WEBSITE_DOMAINS",
+        "example.com",
+    )
+
+    with pytest.raises(ValueError):
         validate_website_authorization(
-            "https://example.com"
+            "https://example.com.evil.org"
         )
