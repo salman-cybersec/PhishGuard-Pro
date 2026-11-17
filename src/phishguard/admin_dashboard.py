@@ -103,6 +103,14 @@ def _login_page(message=""):
                 <button type="submit">Sign in</button>
             </form>
         </main>
+        <script>
+            // Refresh consented participant telemetry and campaign metrics.
+            window.setInterval(() => {
+                if (document.visibilityState === "visible") {
+                    window.location.reload();
+                }
+            }, 10000);
+        </script>
     </body>
     </html>
     """
@@ -273,13 +281,44 @@ def admin_dashboard(request: Request, message: str = ""):
                 campaign["tracking_code"],
             )
 
-        for participant in participants[:5]:
+        for participant in participants[:25]:
             if participant["completed"]:
                 participant_status = "Completed"
             elif participant["consent_activity"]:
                 participant_status = "In progress"
             else:
                 participant_status = "Not tracked"
+
+            ip_value = (
+                participant["ip_address"]
+                if participant["consent_ip"]
+                else "Not consented"
+            )
+            browser_value = (
+                " ".join(
+                    value for value in (
+                        participant["browser_name"],
+                        participant["browser_version"],
+                    ) if value
+                )
+                if participant["consent_device"]
+                else "Not consented"
+            )
+            os_value = (
+                participant["os_name"]
+                if participant["consent_device"]
+                else "Not consented"
+            )
+            device_value = (
+                participant["device_type"]
+                if participant["consent_device"]
+                else "Not consented"
+            )
+            user_agent_value = (
+                participant["user_agent"]
+                if participant["consent_device"] and participant["user_agent"]
+                else "Not consented"
+            )
 
             recent_rows.append(
                 f"""
@@ -288,6 +327,12 @@ def admin_dashboard(request: Request, message: str = ""):
                     <td>{escape(str(participant["submitted_at"]))}</td>
                     <td>{escape(str(participant["total_events"]))}</td>
                     <td>{escape(participant_status)}</td>
+                    <td>{escape(str(ip_value))}</td>
+                    <td>{escape(str(browser_value))}</td>
+                    <td>{escape(str(os_value))}</td>
+                    <td>{escape(str(device_value))}</td>
+                    <td title="{escape(str(user_agent_value), quote=True)}">{escape(str(user_agent_value))}</td>
+                    <td>{escape(str(participant["last_activity"] or "No activity"))}</td>
                 </tr>
                 """
             )
@@ -295,7 +340,7 @@ def admin_dashboard(request: Request, message: str = ""):
         recent_table = (
             "\n".join(recent_rows)
             if recent_rows
-            else '<tr><td colspan="4">No participants yet.</td></tr>'
+            else '<tr><td colspan="10">No participants yet.</td></tr>'
         )
 
         campaign_cards.append(
@@ -359,6 +404,12 @@ def admin_dashboard(request: Request, message: str = ""):
                                 <th>Submitted</th>
                                 <th>Events</th>
                                 <th>Status</th>
+                                <th>Public IP (consent)</th>
+                                <th>Browser</th>
+                                <th>Operating system</th>
+                                <th>Device</th>
+                                <th>User-Agent</th>
+                                <th>Last activity</th>
                             </tr>
                         </thead>
                         <tbody>
