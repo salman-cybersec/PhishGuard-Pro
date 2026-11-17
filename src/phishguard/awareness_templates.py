@@ -3,6 +3,7 @@ from html import escape
 
 from phishguard.services import (
     get_service,
+    get_service_scenarios,
     validate_scenario,
 )
 
@@ -10,98 +11,62 @@ from phishguard.services import (
 TEMPLATES = {
     "account_security": {
         "title": "Account Security Awareness",
-        "message": (
-            "Learn how to identify suspicious account "
-            "security messages and unexpected login requests."
-        ),
+        "message": "Learn how to identify suspicious account security messages and unexpected login requests.",
         "action": "Review Security Tips",
     },
     "free_followers_awareness": {
         "title": "Free Followers Awareness",
-        "message": (
-            "Unrealistic follower offers can be used to "
-            "trick people into visiting unsafe websites."
-        ),
+        "message": "Unrealistic follower offers can be used to trick people into visiting unsafe websites.",
         "action": "Review Safety Tips",
     },
     "free_offers_awareness": {
         "title": "Free Offers Awareness",
-        "message": (
-            "Unexpected free offers may contain suspicious "
-            "links or misleading requests."
-        ),
+        "message": "Unexpected free offers may contain suspicious links or misleading requests.",
         "action": "Review Offer Safety",
     },
     "payment_security": {
         "title": "Payment Security Awareness",
-        "message": (
-            "Always verify payment requests and confirm "
-            "the destination before taking action."
-        ),
+        "message": "Always verify payment requests and confirm the destination before taking action.",
         "action": "Review Payment Safety",
     },
     "account_recovery_awareness": {
         "title": "Account Recovery Awareness",
-        "message": (
-            "Be careful with unexpected account recovery "
-            "messages and verification requests."
-        ),
+        "message": "Be careful with unexpected account recovery messages and verification requests.",
         "action": "Review Recovery Safety",
     },
     "subscription_awareness": {
         "title": "Subscription Security Awareness",
-        "message": (
-            "Check subscription notifications through "
-            "official channels before responding."
-        ),
+        "message": "Check subscription notifications through official channels before responding.",
         "action": "Review Subscription Safety",
     },
     "job_offer_awareness": {
         "title": "Job Offer Awareness",
-        "message": (
-            "Verify recruiters, company identities and "
-            "unexpected job opportunities."
-        ),
+        "message": "Verify recruiters, company identities and unexpected job opportunities.",
         "action": "Review Job Safety",
     },
     "verification_awareness": {
         "title": "Verification Security Awareness",
-        "message": (
-            "Never share verification codes with someone "
-            who contacts you unexpectedly."
-        ),
+        "message": "Never share verification codes with someone who contacts you unexpectedly.",
         "action": "Review Verification Safety",
     },
     "shopping_security": {
         "title": "Shopping Security Awareness",
-        "message": (
-            "Check website addresses, sellers and payment "
-            "requests before making online purchases."
-        ),
+        "message": "Check website addresses, sellers and payment requests before making online purchases.",
         "action": "Review Shopping Safety",
     },
     "delivery_awareness": {
         "title": "Delivery Message Awareness",
-        "message": (
-            "Unexpected delivery messages may contain "
-            "misleading links or payment requests."
-        ),
+        "message": "Unexpected delivery messages may contain misleading links or payment requests.",
         "action": "Review Delivery Safety",
     },
     "gaming_security": {
         "title": "Gaming Security Awareness",
-        "message": (
-            "Protect gaming accounts and be cautious "
-            "of suspicious rewards and offers."
-        ),
+        "message": "Protect gaming accounts and be cautious of suspicious rewards and offers.",
         "action": "Review Gaming Safety",
     },
     "community_safety": {
         "title": "Community Safety Awareness",
-        "message": (
-            "Check suspicious messages, links and "
-            "unexpected requests in online communities."
-        ),
+        "message": "Check suspicious messages, links and unexpected requests in online communities.",
         "action": "Review Community Safety",
     },
 }
@@ -110,6 +75,18 @@ TEMPLATES = {
 def get_template(service_id, scenario_id):
     service = get_service(service_id)
     scenario = validate_scenario(service_id, scenario_id)
+
+    scenario_details = next(
+        (
+            item
+            for item in get_service_scenarios(service_id)
+            if item["id"] == scenario["scenario_id"]
+        ),
+        None,
+    )
+
+    if scenario_details is None:
+        raise ValueError("Awareness scenario is unavailable.")
 
     template = TEMPLATES.get(scenario["scenario_id"])
 
@@ -120,7 +97,7 @@ def get_template(service_id, scenario_id):
         "service_id": service["id"],
         "service_name": service["name"],
         "scenario_id": scenario["scenario_id"],
-        "scenario_name": scenario["scenario_name"],
+        "scenario_name": scenario_details["name"],
         "title": template["title"],
         "message": template["message"],
         "action": template["action"],
@@ -142,9 +119,7 @@ def render_awareness_page(service_id, scenario_id):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
-* {{
-    box-sizing: border-box;
-}}
+* {{ box-sizing: border-box; }}
 body {{
     margin: 0;
     padding: 24px;
@@ -172,17 +147,9 @@ body {{
     color: #174ea6;
     font-weight: bold;
 }}
-h1 {{
-    margin-top: 24px;
-    font-size: 26px;
-}}
-p {{
-    line-height: 1.7;
-}}
-.service {{
-    color: #64748b;
-    font-size: 14px;
-}}
+h1 {{ margin-top: 24px; font-size: 26px; }}
+p {{ line-height: 1.7; }}
+.service {{ color: #64748b; font-size: 14px; }}
 button {{
     margin-top: 16px;
     padding: 12px 18px;
