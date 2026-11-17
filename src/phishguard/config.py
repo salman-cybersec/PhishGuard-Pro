@@ -1,5 +1,6 @@
 
 import os
+import re
 from pathlib import Path
 
 
@@ -61,6 +62,27 @@ if not APP_HOST:
 APP_PORT = _get_port("PHISHGUARD_PORT", 3399)
 
 DEBUG = _get_boolean("PHISHGUARD_DEBUG", False)
+
+LOCAL_PREVIEW_BASE_URL = (
+    f"http://127.0.0.1:{APP_PORT}"
+)
+
+PREVIEW_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]{24}$"
+)
+
+
+def build_preview_url(preview_id: str) -> str:
+    if (
+        not isinstance(preview_id, str)
+        or not PREVIEW_ID_PATTERN.fullmatch(preview_id)
+    ):
+        raise ValueError("Invalid preview ID.")
+
+    return (
+        f"{LOCAL_PREVIEW_BASE_URL}/preview/{preview_id}"
+    )
+
 
 MAX_REQUEST_SIZE = 1_000_000
 RATE_LIMIT_PER_MINUTE = 60
