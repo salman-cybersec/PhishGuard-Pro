@@ -2,9 +2,13 @@
 from html import escape
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from phishguard.database import get_connection
+from phishguard.campaigns import create_campaign
+from phishguard.campaign_controls import update_campaign_status
+from phishguard.link_manager import get_tracking_link
+from phishguard.participant_export import export_participants_csv
 from phishguard.analytics import get_campaign_analytics
 from phishguard.participant_reports import get_participant_report
 from phishguard.auth import (
@@ -174,16 +178,75 @@ def admin_logout(request: Request):
     return response
 
 
+@router.post(
+    "/admin/campaigns",
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_create_campaign(
+    request: Request,
+    name: str = Form(..., max_length=100),
+):
+    try:
+        create_campaign(name)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    return RedirectResponse(
+        url="/admin/dashboard?message=Campaign%20created",
+        status_code=303,
+    )
+
+
+@router.post(
+    "/admin/campaigns/{campaign_id}/status",
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_change_campaign_status(
+    campaign_id: int,
+    status: str = Form(...),
+):
+    try:
+        update_campaign_status(campaign_id, status)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    return RedirectResponse(
+        url="/admin/dashboard?message=Campaign%20status%20updated",
+        status_code=303,
+    )
+
+
+@router.get(
+    "/admin/campaigns/{campaign_id}/participants.csv",
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_export_participants(campaign_id: int):
+    try:
+        csv_data = export_participants_csv(campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="participants_{campaign_id}.csv"'
+            )
+        },
+    )
+
+
 @router.get(
     "/admin/dashboard",
     response_class=HTMLResponse,
     dependencies=[Depends(verify_admin_session)],
 )
-def admin_dashboard():
+def admin_dashboard(request: Request, message: str = ""):
     with get_connection() as connection:
         campaigns = connection.execute(
             """
-            SELECT id, name, status, created_at
+            SELECT id, name, tracking_code, status, created_at
             FROM campaigns
             ORDER BY id DESC
             """
@@ -202,6 +265,13 @@ def admin_dashboard():
 
         participants = report["participants"]
         recent_rows = []
+
+        training_link = ""
+        if campaign["status"] == "active":
+            training_link = get_tracking_link(
+                str(request.base_url).rstrip("/"),
+                campaign["tracking_code"],
+            )
 
         for participant in participants[:5]:
             if participant["completed"]:
@@ -235,6 +305,17 @@ def admin_dashboard():
                 <p class="status">
                     Status: {escape(campaign["status"])}
                 </p>
+                <p class="training-link">
+                    Training link:
+                    {f'<a href="{escape(training_link, quote=True)}">{escape(training_link)}</a>' if training_link else 'Activate this campaign to enable its training link.'}
+                </p>
+                <div class="campaign-actions">
+                    {f'<form method="post" action="/admin/campaigns/{campaign_id}/status"><input type="hidden" name="status" value="active"><button type="submit">Activate</button></form>' if campaign["status"] == "draft" else ''}
+                    {f'<form method="post" action="/admin/campaigns/{campaign_id}/status"><input type="hidden" name="status" value="paused"><button type="submit">Pause</button></form>' if campaign["status"] == "active" else ''}
+                    {f'<form method="post" action="/admin/campaigns/{campaign_id}/status"><input type="hidden" name="status" value="active"><button type="submit">Resume</button></form>' if campaign["status"] == "paused" else ''}
+                    {f'<form method="post" action="/admin/campaigns/{campaign_id}/status"><input type="hidden" name="status" value="completed"><button type="submit">Complete</button></form>' if campaign["status"] in ("active", "paused") else ''}
+                    <a class="export-link" href="/admin/campaigns/{campaign_id}/participants.csv">Export participants CSV</a>
+                </div>
 
                 <div class="metrics">
                     <div class="metric">
@@ -361,6 +442,46 @@ def admin_dashboard():
                 border-bottom: 1px solid #e2e8f0;
             }}
             th {{ background: #f8fafc; }}
+            .training-link {{ overflow-wrap: anywhere; }}
+            .campaign-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; align-items: center; }}
+            .campaign-actions form {{ margin: 0; }}
+            .campaign-actions button, .export-link {{
+                display: inline-block;
+                padding: 9px 13px;
+                border: 0;
+                border-radius: 7px;
+                background: #1e40af;
+                color: white;
+                text-decoration: none;
+                cursor: pointer;
+                font-size: 14px;
+            }}
+            .create-campaign {{
+                background: white;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 20px;
+                margin-bottom: 24px;
+            }}
+            .create-campaign label {{ display: block; margin-bottom: 8px; font-weight: bold; }}
+            .create-campaign input {{
+                width: 100%;
+                max-width: 460px;
+                padding: 11px;
+                border: 1px solid #cbd5e1;
+                border-radius: 7px;
+                font-size: 16px;
+            }}
+            .create-campaign button {{
+                margin-top: 12px;
+                padding: 11px 16px;
+                border: 0;
+                border-radius: 7px;
+                background: #1e40af;
+                color: white;
+                cursor: pointer;
+            }}
+            .notice {{ color: #166534; }}
             .logout button {{
                 padding: 10px 16px;
                 border: 0;
@@ -389,6 +510,16 @@ def admin_dashboard():
             </form>
         </header>
         <main>
+            {f'<p class="notice">{escape(message)}</p>' if message else ''}
+            <section class="create-campaign">
+                <h2>Create campaign</h2>
+                <form method="post" action="/admin/campaigns">
+                    <label for="campaign-name">Campaign name</label>
+                    <input id="campaign-name" name="name" type="text"
+                           minlength="1" maxlength="100" required>
+                    <button type="submit">Create campaign</button>
+                </form>
+            </section>
             {content}
         </main>
     </body>
