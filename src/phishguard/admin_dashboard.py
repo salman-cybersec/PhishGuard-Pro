@@ -105,11 +105,11 @@ def _login_page(message=""):
         </main>
         <script>
             // Refresh consented participant telemetry and campaign metrics.
-            window.setInterval(() => {
-                if (document.visibilityState === "visible") {
+            window.setInterval(() => {{
+                if (document.visibilityState === "visible") {{
                     window.location.reload();
-                }
-            }, 10000);
+                }}
+            }}, 10000);
         </script>
     </body>
     </html>
