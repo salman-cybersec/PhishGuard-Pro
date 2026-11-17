@@ -1,13 +1,16 @@
 
 import sqlite3
+from contextlib import contextmanager
 
 from phishguard.config import DATA_DIR
 
 
 DATABASE_PATH = DATA_DIR / "phishguard.db"
 DATABASE_TIMEOUT = 10
+DATABASE_VERSION = 2
 
 
+@contextmanager
 def get_connection():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -16,24 +19,61 @@ def get_connection():
         timeout=DATABASE_TIMEOUT,
     )
 
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 10000")
-    connection.execute("PRAGMA synchronous = FULL")
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA synchronous = FULL")
 
-    return connection
+        yield connection
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
+def _get_columns(connection, table_name):
+    rows = connection.execute(
+        f"PRAGMA table_info({table_name})"
+    ).fetchall()
+
+    return {row["name"] for row in rows}
+
+
+def _add_column_if_missing(
+    connection,
+    table_name,
+    column_name,
+    column_definition,
+):
+    columns = _get_columns(connection, table_name)
+
+    if column_name not in columns:
+        connection.execute(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN {column_name} {column_definition}"
+        )
 
 
 def initialize_database():
     with get_connection() as connection:
+
         connection.execute("PRAGMA journal_mode = WAL")
 
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS campaigns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+
                 name TEXT NOT NULL
                     CHECK(length(name) BETWEEN 1 AND 100),
+
                 tracking_code TEXT NOT NULL UNIQUE,
+
                 status TEXT NOT NULL DEFAULT 'draft'
                     CHECK(status IN (
                         'draft',
@@ -41,25 +81,8 @@ def initialize_database():
                         'paused',
                         'completed'
                     )),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );
 
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                campaign_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL
-                    CHECK(event_type IN (
-                        'page_visit',
-                        'training_page_view',
-                        'form_interaction',
-                        'simulation_complete'
-                    )),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                user_agent TEXT
-                    CHECK(user_agent IS NULL OR length(user_agent) <= 500),
-                FOREIGN KEY (campaign_id)
-                    REFERENCES campaigns(id)
-                    ON DELETE CASCADE
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS participants (
@@ -125,6 +148,35 @@ def initialize_database():
                 )
             );
 
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                campaign_id INTEGER NOT NULL,
+
+                event_type TEXT NOT NULL
+                    CHECK(event_type IN (
+                        'page_visit',
+                        'training_page_view',
+                        'form_interaction',
+                        'simulation_complete'
+                    )),
+
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                user_agent TEXT
+                    CHECK(user_agent IS NULL OR length(user_agent) <= 500),
+
+                participant_id INTEGER,
+
+                FOREIGN KEY (campaign_id)
+                    REFERENCES campaigns(id)
+                    ON DELETE CASCADE,
+
+                FOREIGN KEY (participant_id)
+                    REFERENCES participants(id)
+                    ON DELETE SET NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_events_campaign
             ON events(campaign_id);
 
@@ -138,6 +190,35 @@ def initialize_database():
             ON participants(participant_token);
         """)
 
+        # Migration for existing databases.
+        # Existing event records remain intact.
+        _add_column_if_missing(
+            connection,
+            "events",
+            "participant_id",
+            "INTEGER REFERENCES participants(id) ON DELETE SET NULL",
+        )
+
+        # Indexes for participant-specific activity queries.
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_participant
+            ON events(participant_id)
+        """)
+
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_campaign_created
+            ON events(campaign_id, created_at)
+        """)
+
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_campaign_participant
+            ON events(campaign_id, participant_id)
+        """)
+
+        connection.execute(
+            f"PRAGMA user_version = {DATABASE_VERSION}"
+        )
+
 
 def verify_database_integrity():
     with get_connection() as connection:
@@ -145,12 +226,34 @@ def verify_database_integrity():
             "PRAGMA integrity_check"
         ).fetchone()
 
-        return result[0] == "ok"
+        foreign_key_errors = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+
+        return (
+            result is not None
+            and result[0] == "ok"
+            and len(foreign_key_errors) == 0
+        )
+
+
+def get_database_version():
+    with get_connection() as connection:
+        result = connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()
+
+        return result[0]
 
 
 if __name__ == "__main__":
     initialize_database()
+
     print("Database initialized.")
+
+    print(
+        f"Database version: {get_database_version()}"
+    )
 
     if verify_database_integrity():
         print("Database integrity verified.")
