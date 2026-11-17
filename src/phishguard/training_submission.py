@@ -11,6 +11,9 @@ from phishguard.device_info import parse_device_info
 
 router = APIRouter()
 
+COOKIE_NAME = "phishguard_participant"
+COOKIE_MAX_AGE = 8 * 60 * 60
+
 
 @router.post("/training/submit", response_class=HTMLResponse)
 def submit_training_form(
@@ -19,11 +22,15 @@ def submit_training_form(
     participant_name: str = Form(...),
     consent_ip: str | None = Form(None),
     consent_device: str | None = Form(None),
+    consent_activity: str | None = Form(None),
 ):
     name = participant_name.strip()
 
     if campaign_id <= 0:
-        raise HTTPException(status_code=400, detail="Invalid campaign.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid campaign.",
+        )
 
     if not name or len(name) > 100:
         raise HTTPException(
@@ -32,13 +39,26 @@ def submit_training_form(
         )
 
     if consent_ip not in (None, "yes"):
-        raise HTTPException(status_code=400, detail="Invalid IP consent.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid IP consent.",
+        )
 
     if consent_device not in (None, "yes"):
-        raise HTTPException(status_code=400, detail="Invalid device consent.")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid device consent.",
+        )
+
+    if consent_activity not in (None, "yes"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid activity consent.",
+        )
 
     collect_ip = consent_ip == "yes"
     collect_device = consent_device == "yes"
+    collect_activity = consent_activity == "yes"
 
     client_ip = None
     user_agent = None
@@ -53,7 +73,9 @@ def submit_training_form(
             client_ip = None
 
     if collect_device:
-        user_agent = request.headers.get("user-agent", "")[:500] or None
+        user_agent = request.headers.get(
+            "user-agent", ""
+        )[:500] or None
 
         if user_agent:
             device_info = parse_device_info(user_agent)
@@ -64,7 +86,8 @@ def submit_training_form(
         with get_connection() as connection:
             campaign = connection.execute(
                 """
-                SELECT id FROM campaigns
+                SELECT id
+                FROM campaigns
                 WHERE id = ? AND status = 'active'
                 """,
                 (campaign_id,),
@@ -76,7 +99,7 @@ def submit_training_form(
                     detail="Active campaign not found.",
                 )
 
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO participants (
                     campaign_id,
@@ -89,9 +112,10 @@ def submit_training_form(
                     browser_name,
                     browser_version,
                     os_name,
-                    device_type
+                    device_type,
+                    consent_activity
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     campaign_id,
@@ -105,28 +129,70 @@ def submit_training_form(
                     device_info.get("browser_version"),
                     device_info.get("os_name"),
                     device_info.get("device_type"),
+                    int(collect_activity),
                 ),
             )
 
+            participant_id = cursor.lastrowid
+
+            if collect_activity:
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        campaign_id,
+                        participant_id,
+                        event_type,
+                        user_agent
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        campaign_id,
+                        participant_id,
+                        "form_interaction",
+                        user_agent if collect_device else None,
+                    ),
+                )
+
     except HTTPException:
         raise
+
     except Exception as error:
         raise HTTPException(
             status_code=500,
             detail="Unable to save training submission.",
         ) from error
 
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Training Complete</title>
-    </head>
-    <body>
-        <h2>Training submission completed</h2>
-        <p>This was an authorized security-awareness simulation.</p>
-        <p>No password was requested or collected.</p>
-    </body>
-    </html>
-    """
+    response = HTMLResponse(
+        content="""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Training Complete</title>
+        </head>
+        <body>
+            <h2>Training submission completed</h2>
+            <p>This was an authorized security-awareness simulation.</p>
+            <p>No password or verification code was requested or collected.</p>
+            <p>Your selected consent preferences have been applied.</p>
+        </body>
+        </html>
+        """
+    )
+
+    response.headers["Cache-Control"] = "no-store"
+
+    if collect_activity:
+        response.set_cookie(
+            key=COOKIE_NAME,
+            value=participant_token,
+            max_age=COOKIE_MAX_AGE,
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="lax",
+            path="/training",
+        )
+
+    return response
