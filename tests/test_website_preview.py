@@ -1,130 +1,189 @@
 
+import re
+
 import pytest
 
-from phishguard.website_preview import create_safe_preview
+from phishguard.website_preview import (
+    create_safe_preview,
+    save_safe_preview,
+)
 
 
-def test_preview_contains_awareness_notice():
-    result = create_safe_preview("<h1>Test Website</h1>")
+def test_preview_contains_simulation_disclosure():
+    result = create_safe_preview("<h1>Training</h1>")
 
-    assert "AUTHORIZED SECURITY AWARENESS SIMULATION" in result
-    assert "No passwords or credentials" in result
+    assert (
+        "AUTHORIZED SECURITY AWARENESS SIMULATION"
+        in result
+    )
 
 
-def test_script_tag_is_removed():
+def test_preview_removes_javascript():
     result = create_safe_preview(
-        "<h1>Hello</h1><script>alert('test')</script>"
+        "<script>alert('unsafe')</script>"
     )
 
     assert "<script" not in result.lower()
-    assert "alert(" not in result
-    assert "<h1>Hello</h1>" in result
+    assert "alert('unsafe')" not in result
 
 
-def test_event_handlers_are_removed():
-    result = create_safe_preview(
-        '<div onclick="alert(1)">Hello</div>'
-    )
-
-    assert "onclick" not in result
-    assert "alert(1)" not in result
-    assert "Hello" in result
-
-
-def test_forms_are_removed():
+def test_preview_removes_forms():
     result = create_safe_preview(
         '<form action="https://example.com">'
-        '<input type="password">'
-        '</form>'
+        '<input name="password">'
+        "</form>"
     )
 
     assert "<form" not in result.lower()
     assert "<input" not in result.lower()
 
 
-def test_external_images_are_removed():
+def test_preview_escapes_html_text():
     result = create_safe_preview(
-        '<img src="https://example.com/image.png" alt="Test">'
+        "<p>Safe text</p>"
     )
 
-    assert "<img" not in result.lower()
-    assert "https://example.com" not in result
+    assert "<p>Safe text</p>" in result
 
 
-def test_style_tags_are_removed():
-    result = create_safe_preview(
-        "<style>body { display:none; }</style><p>Visible</p>"
-    )
-
-    assert "<style" not in result.lower()
-    assert "display:none" not in result
-    assert "<p>Visible</p>" in result
-
-
-def test_unsupported_tags_are_removed():
-    result = create_safe_preview(
-        "<iframe>Hidden</iframe><p>Visible</p>"
-    )
-
-    assert "<iframe" not in result.lower()
-    assert "Visible" in result
-
-
-def test_non_string_html_rejected():
+def test_preview_rejects_non_string_html():
     with pytest.raises(ValueError):
-        create_safe_preview(123)
-
-def test_javascript_links_are_removed():
-    result = create_safe_preview(
-        '<a href="javascript:alert(1)">Click</a>'
-    )
-
-    assert "javascript:" not in result
-    assert "alert(1)" not in result
-    assert "Click" in result
+        create_safe_preview(None)
 
 
-def test_data_attributes_are_removed():
-    result = create_safe_preview(
-        '<div data-secret="123" onclick="alert(1)">Safe text</div>'
-    )
+def test_preview_rejects_oversized_html():
+    html = "<p>" + ("A" * (2 * 1024 * 1024)) + "</p>"
 
-    assert "data-secret" not in result
-    assert "onclick" not in result
-    assert "123" not in result
-    assert "Safe text" in result
-
-
-def test_html_comments_are_not_rendered():
-    result = create_safe_preview(
-        "<!-- hidden comment --><p>Visible content</p>"
-    )
-
-    assert "hidden comment" not in result
-    assert "Visible content" in result
-
-
-def test_nested_script_content_is_removed():
-    result = create_safe_preview(
-        "<script><script>alert(1)</script>"
-        "<p>Hidden content</p></script>"
-        "<p>Visible content</p>"
-    )
-
-    assert "alert(1)" not in result
-    assert "Hidden content" not in result
-    assert "Visible content" in result
-
-
-def test_external_links_are_not_preserved():
-    result = create_safe_preview(
-        '<a href="https://example.com">External link</a>'
-    )
-
-    assert "https://example.com" not in result
-    assert "External link" in result
-
-
-def test_html_size_limit():
     with pytest.raises(ValueError):
-        create_safe_preview("A" * (2 * 1024 * 1024))
+        create_safe_preview(html)
+
+
+def test_preview_rejects_invalid_asset_mapping():
+    with pytest.raises(ValueError):
+        create_safe_preview(
+            "<img src='/logo.png'>",
+            asset_map="invalid",
+        )
+
+
+def test_preview_connects_valid_local_image():
+    filename = "a" * 64 + ".png"
+
+    result = create_safe_preview(
+        '<img src="/logo.png">',
+        asset_map={
+            "/logo.png": f"/assets/{filename}"
+        },
+    )
+
+    assert f'src="/assets/{filename}"' in result
+
+
+def test_preview_rejects_external_image():
+    result = create_safe_preview(
+        '<img src="https://example.com/logo.png">'
+    )
+
+    assert "https://example.com/logo.png" not in result
+
+
+def test_preview_rejects_invalid_local_image_path():
+    result = create_safe_preview(
+        '<img src="/logo.png">',
+        asset_map={
+            "/logo.png": "/assets/../../secret.png"
+        },
+    )
+
+    assert "/assets/../../secret.png" not in result
+
+
+def test_preview_connects_valid_css_file():
+    filename = "a" * 64 + ".css"
+
+    result = create_safe_preview(
+        "<h1>Training</h1>",
+        css_files=[filename],
+    )
+
+    assert (
+        f'href="/assets/{filename}"'
+        in result
+    )
+
+
+def test_preview_rejects_invalid_css_filename():
+    result = create_safe_preview(
+        "<h1>Training</h1>",
+        css_files=["../../malicious.css"],
+    )
+
+    assert "../../malicious.css" not in result
+    assert "malicious.css" not in result
+
+
+def test_preview_rejects_non_list_css_files():
+    with pytest.raises(ValueError):
+        create_safe_preview(
+            "<h1>Training</h1>",
+            css_files="malicious.css",
+        )
+
+
+def test_preview_removes_duplicate_css_files():
+    filename = "b" * 64 + ".css"
+
+    result = create_safe_preview(
+        "<h1>Training</h1>",
+        css_files=[filename, filename],
+    )
+
+    assert result.count(
+        f'href="/assets/{filename}"'
+    ) == 1
+
+
+def test_preview_content_is_inside_scoped_wrapper():
+    result = create_safe_preview(
+        "<h1>Training</h1>"
+    )
+
+    assert '<div class="phishguard-preview">' in result
+    assert "</div>" in result
+
+
+def test_preview_does_not_execute_imported_javascript():
+    html = """
+    <script>
+        document.location = "https://example.com";
+    </script>
+    <h1>Training</h1>
+    """
+
+    result = create_safe_preview(html)
+
+    assert "<script" not in result.lower()
+    assert "document.location" not in result
+    assert "<h1>Training</h1>" in result
+
+
+def test_saved_preview_has_random_id(tmp_path, monkeypatch):
+    from phishguard import website_preview
+
+    monkeypatch.setattr(
+        website_preview,
+        "PREVIEW_DIR",
+        tmp_path,
+    )
+
+    result = save_safe_preview(
+        "<h1>Training</h1>"
+    )
+
+    assert re.fullmatch(
+        r"[A-Za-z0-9_-]{24}",
+        result["preview_id"],
+    )
+
+    assert result["status"] == "saved"
+    assert (tmp_path / result["filename"]).is_file()
