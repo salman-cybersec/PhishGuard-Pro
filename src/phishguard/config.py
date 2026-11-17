@@ -63,6 +63,26 @@ APP_PORT = _get_port("PHISHGUARD_PORT", 3399)
 
 DEBUG = _get_boolean("PHISHGUARD_DEBUG", False)
 
+DATABASE_BACKEND = os.getenv(
+    "PHISHGUARD_DATABASE_BACKEND",
+    "sqlite",
+).strip().lower()
+
+if DATABASE_BACKEND not in {"sqlite", "postgresql"}:
+    raise ValueError(
+        "PHISHGUARD_DATABASE_BACKEND must be sqlite or postgresql."
+    )
+
+DATABASE_URL = os.getenv(
+    "PHISHGUARD_DATABASE_URL",
+    "",
+).strip()
+
+if DATABASE_BACKEND == "postgresql" and not DATABASE_URL:
+    raise ValueError(
+        "PHISHGUARD_DATABASE_URL is required for PostgreSQL."
+    )
+
 LOCAL_PREVIEW_BASE_URL = (
     f"http://127.0.0.1:{APP_PORT}"
 )
