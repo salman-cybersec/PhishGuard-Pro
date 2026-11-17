@@ -1,5 +1,6 @@
 
 import re
+import hashlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -43,13 +44,14 @@ PREVIEW_ID_PATTERN = re.compile(
 )
 
 ASSET_FILENAME_PATTERN = re.compile(
-    r"^[a-f0-9]{64}\.(?:png|jpg|webp)$"
+    r"^[a-f0-9]{64}\.(?:png|jpg|webp|css)$"
 )
 
 ASSET_CONTENT_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".webp": "image/webp",
+    ".css": "text/css",
 }
 
 
@@ -414,7 +416,7 @@ def serve_website_preview(preview_id: str):
                 "Content-Security-Policy": (
                     "default-src 'none'; "
                     "img-src 'self'; "
-                    "style-src 'unsafe-inline'; "
+                    "style-src 'self' 'unsafe-inline'; "
                     "script-src 'none'; "
                     "connect-src 'none'; "
                     "font-src 'none'; "
@@ -475,6 +477,20 @@ def serve_website_asset(filename: str):
                 detail="Asset not found.",
             )
 
+        # Confirm that the stored asset matches its
+        # content-addressed SHA-256 filename.
+        digest = hashlib.sha256(
+            asset_path.read_bytes()
+        ).hexdigest()
+
+        expected_digest = filename.rsplit(".", 1)[0]
+
+        if digest != expected_digest:
+            raise HTTPException(
+                status_code=404,
+                detail="Asset integrity check failed.",
+            )
+
         return FileResponse(
             path=asset_path,
             media_type=content_type,
@@ -482,6 +498,7 @@ def serve_website_asset(filename: str):
                 "Content-Disposition": "inline",
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'",
             },
         )
 
