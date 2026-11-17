@@ -27,10 +27,7 @@ def submit_training_form(
     name = participant_name.strip()
 
     if campaign_id <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid campaign.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid campaign.")
 
     if not name or len(name) > 100:
         raise HTTPException(
@@ -39,22 +36,13 @@ def submit_training_form(
         )
 
     if consent_ip not in (None, "yes"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid IP consent.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid IP consent.")
 
     if consent_device not in (None, "yes"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid device consent.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid device consent.")
 
     if consent_activity not in (None, "yes"):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid activity consent.",
-        )
+        raise HTTPException(status_code=400, detail="Invalid activity consent.")
 
     collect_ip = consent_ip == "yes"
     collect_device = consent_device == "yes"
@@ -73,9 +61,7 @@ def submit_training_form(
             client_ip = None
 
     if collect_device:
-        user_agent = request.headers.get(
-            "user-agent", ""
-        )[:500] or None
+        user_agent = request.headers.get("user-agent", "")[:500] or None
 
         if user_agent:
             device_info = parse_device_info(user_agent)
@@ -163,8 +149,65 @@ def submit_training_form(
             detail="Unable to save training submission.",
         ) from error
 
+    activity_section = ""
+
+    if collect_activity:
+        activity_section = f"""
+        <p>Your consented training activity can now be recorded.</p>
+
+        <button id="complete-training" type="button">
+            Complete training
+        </button>
+
+        <p id="activity-status" role="status"></p>
+
+        <script>
+        (() => {{
+            const endpoint = "/training/activity/{campaign_id}";
+            const status = document.getElementById("activity-status");
+            const button = document.getElementById("complete-training");
+
+            async function sendEvent(eventType) {{
+                const body = new URLSearchParams();
+                body.set("event_type", eventType);
+
+                const response = await fetch(endpoint, {{
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {{
+                        "Content-Type": "application/x-www-form-urlencoded"
+                    }},
+                    body: body.toString()
+                }});
+
+                if (!response.ok) {{
+                    throw new Error("Activity event could not be saved.");
+                }}
+
+                return response.json();
+            }}
+
+            sendEvent("training_page_view").catch(() => {{
+                status.textContent = "Training view event could not be recorded.";
+            }});
+
+            button.addEventListener("click", async () => {{
+                button.disabled = true;
+
+                try {{
+                    await sendEvent("simulation_complete");
+                    status.textContent = "Training completion recorded.";
+                }} catch (error) {{
+                    status.textContent = "Unable to record completion. Please contact your supervisor.";
+                    button.disabled = false;
+                }}
+            }});
+        }})();
+        </script>
+        """
+
     response = HTMLResponse(
-        content="""
+        content=f"""
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -177,6 +220,7 @@ def submit_training_form(
             <p>This was an authorized security-awareness simulation.</p>
             <p>No password or verification code was requested or collected.</p>
             <p>Your selected consent preferences have been applied.</p>
+            {activity_section}
         </body>
         </html>
         """
