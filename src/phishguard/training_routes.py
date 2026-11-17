@@ -10,30 +10,56 @@ router = APIRouter()
 
 
 @router.get(
-    "/training/{campaign_id}",
+    "/training/{campaign_reference}",
     response_class=HTMLResponse,
 )
 def show_training_page(
-    campaign_id: int,
+    campaign_reference: str,
     service_id: str | None = Query(default=None),
     scenario_id: str | None = Query(default=None),
 ):
-    if campaign_id <= 0:
+    if (
+        not isinstance(campaign_reference, str)
+        or not campaign_reference
+        or len(campaign_reference) > 100
+    ):
         raise HTTPException(
             status_code=400,
-            detail="Invalid campaign ID.",
+            detail="Invalid campaign reference.",
         )
 
     try:
         with get_connection() as connection:
+
             campaign = connection.execute(
                 """
-                SELECT id, name
+                SELECT id, name, tracking_code
                 FROM campaigns
-                WHERE id = ? AND status = 'active'
+                WHERE tracking_code = ?
+                  AND status = 'active'
                 """,
-                (campaign_id,),
+                (campaign_reference,),
             ).fetchone()
+
+            # Backward compatibility for existing numeric campaign links.
+            if campaign is None and campaign_reference.isdecimal():
+                campaign_id = int(campaign_reference)
+
+                if campaign_id <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid campaign ID.",
+                    )
+
+                campaign = connection.execute(
+                    """
+                    SELECT id, name, tracking_code
+                    FROM campaigns
+                    WHERE id = ?
+                      AND status = 'active'
+                    """,
+                    (campaign_id,),
+                ).fetchone()
 
         if campaign is None:
             raise HTTPException(
@@ -52,11 +78,13 @@ def show_training_page(
 
     except HTTPException:
         raise
+
     except ValueError as error:
         raise HTTPException(
             status_code=400,
             detail=str(error),
         ) from error
+
     except Exception as error:
         raise HTTPException(
             status_code=500,
