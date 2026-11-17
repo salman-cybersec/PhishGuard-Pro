@@ -1,6 +1,5 @@
 
 import hashlib
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from phishguard.config import DATA_DIR
@@ -47,10 +46,14 @@ def _validate_asset_url(url, original_host):
     if parsed.scheme.lower() != "https":
         raise ValueError("Only HTTPS assets are allowed")
 
-    if not hostname or hostname.lower().rstrip(".") != original_host.lower().rstrip("."):
+    if (
+        not hostname
+        or hostname.lower().rstrip(".")
+        != original_host.lower().rstrip(".")
+    ):
         raise ValueError("Asset host is not authorized")
 
-    if parsed.username or parsed.password:
+    if parsed.username is not None or parsed.password is not None:
         raise ValueError("Asset URL credentials are not allowed")
 
     if port not in (None, 443):
@@ -78,11 +81,13 @@ def download_asset(url, original_host):
         max_bytes=MAX_ASSET_SIZE,
     )
 
-    if response.status_code != 200:
+    if response["status_code"] != 200:
         raise ValueError("Asset download failed")
 
-    content_type = response.headers.get(
-        "content-type", ""
+    headers = response["headers"]
+
+    content_type = headers.get(
+        "Content-Type", ""
     ).split(";", 1)[0].strip().lower()
 
     extension = ALLOWED_TYPES.get(content_type)
@@ -90,7 +95,7 @@ def download_asset(url, original_host):
     if extension is None:
         raise ValueError("Asset content type is not allowed")
 
-    content = response.content
+    content = response["content"]
 
     if not content:
         raise ValueError("Asset is empty")
