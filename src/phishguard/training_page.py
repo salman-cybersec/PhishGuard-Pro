@@ -10,7 +10,12 @@ def render_training_page(
     service_id: str | None = None,
     scenario_id: str | None = None,
 ) -> str:
-    if not isinstance(campaign_id, int) or campaign_id <= 0:
+
+    if (
+        not isinstance(campaign_id, int)
+        or isinstance(campaign_id, bool)
+        or campaign_id <= 0
+    ):
         raise ValueError("Invalid campaign ID.")
 
     if not isinstance(campaign_name, str):
@@ -29,7 +34,6 @@ def render_training_page(
         )
 
     safe_name = escape(campaign_name)
-
     awareness_section = ""
 
     if service_id is not None:
@@ -126,8 +130,10 @@ def render_training_page(
 
         <div class="notice">
             This is an authorized security-awareness simulation.
-            No real passwords or verification codes are requested
-            or collected. Review the data collection choices below.
+            No real passwords, OTPs, verification codes or session
+            credentials are requested or collected.
+
+            Data collection choices are optional and explained below.
         </div>
 
         <h3>{safe_name}</h3>
@@ -135,9 +141,11 @@ def render_training_page(
         {awareness_section}
 
         <form method="post" action="/training/submit">
-            <input type="hidden"
-                   name="campaign_id"
-                   value="{campaign_id}">
+            <input
+                type="hidden"
+                name="campaign_id"
+                value="{campaign_id}"
+            >
 
             <label for="participant_name">
                 Participant name or username
@@ -154,14 +162,26 @@ def render_training_page(
 
             <label class="consent">
                 <input type="checkbox" name="consent_ip" value="yes">
-                <span>I consent to collection of my public IP address.</span>
+                <span>
+                    I consent to collection of my public-facing
+                    connection IP address.
+                </span>
             </label>
 
             <label class="consent">
                 <input type="checkbox" name="consent_device" value="yes">
                 <span>
-                    I consent to collection of my browser and device
-                    information.
+                    I consent to collection of my browser, operating
+                    system and device information from my User-Agent.
+                </span>
+            </label>
+
+            <label class="consent">
+                <input type="checkbox" name="consent_activity" value="yes">
+                <span>
+                    I consent to recording my training page views,
+                    submitted training interactions and completion
+                    timestamps for this campaign.
                 </span>
             </label>
 
