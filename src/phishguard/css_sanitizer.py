@@ -1,211 +1,265 @@
 
-import pytest
+import re
 
-from phishguard.css_sanitizer import (
-    sanitize_css,
-    scope_css,
+import tinycss2
+
+
+MAX_CSS_SIZE = 1_000_000
+
+ALLOWED_PROPERTIES = {
+    "color",
+    "background-color",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "font-style",
+    "text-align",
+    "text-decoration",
+    "text-transform",
+    "line-height",
+    "letter-spacing",
+    "word-spacing",
+    "white-space",
+    "width",
+    "max-width",
+    "min-width",
+    "height",
+    "max-height",
+    "min-height",
+    "margin",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "border",
+    "border-width",
+    "border-style",
+    "border-color",
+    "border-radius",
+    "display",
+    "flex",
+    "flex-direction",
+    "flex-wrap",
+    "justify-content",
+    "align-items",
+    "gap",
+    "grid-template-columns",
+    "grid-template-rows",
+    "overflow",
+    "overflow-wrap",
+    "box-sizing",
+    "vertical-align",
+    "list-style",
+    "list-style-type",
+    "opacity",
+    "cursor",
+}
+
+UNSAFE_VALUE_PATTERN = re.compile(
+    r"(expression\s*\(|javascript\s*:|behavior\s*:|"
+    r"-moz-binding|@import|url\s*\()",
+    re.IGNORECASE,
+)
+
+SAFE_SCOPE_PATTERN = re.compile(
+    r"^\.[a-zA-Z_][a-zA-Z0-9_-]*$"
 )
 
 
-def test_safe_css_is_preserved():
-    css = """
-    h1 {
-        color: blue;
-        font-size: 24px;
-    }
-    """
+def _validate_css(css):
+    if not isinstance(css, str):
+        raise ValueError("CSS input must be a string.")
 
-    result = sanitize_css(css)
+    if len(css.encode("utf-8")) > MAX_CSS_SIZE:
+        raise ValueError("CSS exceeds the maximum size.")
 
-    assert "color: blue" in result
-    assert "font-size: 24px" in result
+    if "\x00" in css:
+        raise ValueError("CSS contains invalid characters.")
 
 
-def test_import_rule_is_removed():
-    css = """
-    @import url("https://example.com/style.css");
+def _safe_declaration(declaration):
+    if declaration.type != "declaration":
+        return None
 
-    h1 {
-        color: red;
-    }
-    """
+    name = declaration.lower_name
 
-    result = sanitize_css(css)
+    if name not in ALLOWED_PROPERTIES:
+        return None
 
-    assert "@import" not in result
-    assert "color: red" in result
+    if declaration.important:
+        return None
 
+    value = tinycss2.serialize(
+        declaration.value
+    ).strip()
 
-def test_external_url_is_removed():
-    css = """
-    .logo {
-        background-color: red;
-        background-image: url("https://example.com/image.png");
-    }
-    """
+    if not value:
+        return None
 
-    result = sanitize_css(css)
+    if UNSAFE_VALUE_PATTERN.search(value):
+        return None
 
-    assert "background-image" not in result
-    assert "background-color: red" in result
+    if any(
+        token.type == "error"
+        for token in declaration.value
+    ):
+        return None
 
-
-def test_expression_is_removed():
-    css = """
-    .box {
-        color: expression(alert(1));
-    }
-    """
-
-    result = sanitize_css(css)
-
-    assert "expression" not in result
+    return f"{name}: {value}"
 
 
-def test_unsupported_property_is_removed():
-    css = """
-    .box {
-        color: red;
-        position: fixed;
-        z-index: 9999;
-    }
-    """
+def sanitize_css(css):
+    _validate_css(css)
 
-    result = sanitize_css(css)
+    if not css.strip():
+        return ""
 
-    assert "color: red" in result
-    assert "position" not in result
-    assert "z-index" not in result
+    rules = tinycss2.parse_stylesheet(
+        css,
+        skip_comments=True,
+        skip_whitespace=True,
+    )
 
+    output = []
 
-def test_important_declaration_is_removed():
-    css = """
-    .box {
-        color: red !important;
-    }
-    """
+    for rule in rules:
+        if rule.type != "qualified-rule":
+            continue
 
-    result = sanitize_css(css)
+        selector = tinycss2.serialize(
+            rule.prelude
+        ).strip()
 
-    assert "color" not in result
+        if not selector:
+            continue
 
+        if any(
+            token.type == "error"
+            for token in rule.prelude
+        ):
+            continue
 
-def test_at_font_face_is_removed():
-    css = """
-    @font-face {
-        font-family: custom;
-        src: url("https://example.com/font.woff");
-    }
-    """
-
-    result = sanitize_css(css)
-
-    assert "@font-face" not in result
-
-
-def test_invalid_css_input():
-    with pytest.raises(ValueError):
-        sanitize_css(None)
-
-
-def test_oversized_css_is_rejected():
-    css = "a { color: red; }" * 100000
-
-    with pytest.raises(ValueError):
-        sanitize_css(css)
-
-
-def test_empty_css():
-    assert sanitize_css("") == ""
-
-
-def test_css_selectors_are_scoped():
-    css = """
-    h1 {
-        color: blue;
-    }
-    """
-
-    result = scope_css(css)
-
-    assert ".phishguard-preview h1" in result
-    assert "color: blue" in result
-
-
-def test_multiple_selectors_are_scoped():
-    css = """
-    h1, p {
-        color: green;
-    }
-    """
-
-    result = scope_css(css)
-
-    assert ".phishguard-preview h1" in result
-    assert ".phishguard-preview p" in result
-
-
-def test_comma_inside_function_is_preserved():
-    css = """
-    :not(.first, .second) {
-        color: red;
-    }
-    """
-
-    result = scope_css(css)
-
-    assert ":not(.first, .second)" in result
-
-
-def test_root_selector_is_scoped():
-    css = """
-    body {
-        color: black;
-    }
-    """
-
-    result = scope_css(css)
-
-    assert ".phishguard-preview {" in result
-
-
-def test_invalid_scope_is_rejected():
-    with pytest.raises(ValueError):
-        scope_css(
-            "h1 { color: red; }",
-            scope="body; script",
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
         )
 
+        safe_declarations = []
 
-def test_scope_css_rejects_non_string():
-    with pytest.raises(ValueError):
-        scope_css(None)
+        for declaration in declarations:
+            safe = _safe_declaration(declaration)
 
+            if safe:
+                safe_declarations.append(safe)
 
-def test_scoped_css_blocks_external_urls():
-    css = """
-    .box {
-        background-image: url("https://example.com/a.png");
-        color: blue;
-    }
-    """
+        if safe_declarations:
+            output.append(
+                f"{selector} {{ "
+                + "; ".join(safe_declarations)
+                + "; }"
+            )
 
-    result = scope_css(css)
-
-    assert "background-image" not in result
-    assert "color: blue" in result
+    return "\n".join(output)
 
 
-def test_scoped_css_removes_unsupported_at_rules():
-    css = """
-    @import "remote.css";
+def _split_selectors(tokens):
+    selectors = []
+    current = []
 
-    .box {
-        color: green;
-    }
-    """
+    for token in tokens:
+        if token.type == "literal" and token.value == ",":
+            value = tinycss2.serialize(current).strip()
 
-    result = scope_css(css)
+            if value:
+                selectors.append(value)
 
-    assert "@import" not in result
-    assert "color: green" in result
+            current = []
+        else:
+            current.append(token)
+
+    value = tinycss2.serialize(current).strip()
+
+    if value:
+        selectors.append(value)
+
+    return selectors
+
+
+def scope_css(css, scope=".phishguard-preview"):
+    _validate_css(css)
+
+    if (
+        not isinstance(scope, str)
+        or not SAFE_SCOPE_PATTERN.fullmatch(scope)
+    ):
+        raise ValueError("Invalid CSS scope.")
+
+    if not css.strip():
+        return ""
+
+    rules = tinycss2.parse_stylesheet(
+        css,
+        skip_comments=True,
+        skip_whitespace=True,
+    )
+
+    output = []
+
+    for rule in rules:
+        if rule.type != "qualified-rule":
+            continue
+
+        selectors = _split_selectors(rule.prelude)
+
+        if not selectors:
+            continue
+
+        scoped_selectors = []
+
+        for selector in selectors:
+            normalized = selector.strip()
+
+            if not normalized:
+                continue
+
+            if normalized.lower() in {"html", "body", ":root"}:
+                scoped_selectors.append(scope)
+            elif normalized.startswith(scope):
+                scoped_selectors.append(normalized)
+            else:
+                scoped_selectors.append(
+                    f"{scope} {normalized}"
+                )
+
+        if not scoped_selectors:
+            continue
+
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+
+        safe_declarations = []
+
+        for declaration in declarations:
+            safe = _safe_declaration(declaration)
+
+            if safe:
+                safe_declarations.append(safe)
+
+        if safe_declarations:
+            output.append(
+                ", ".join(scoped_selectors)
+                + " { "
+                + "; ".join(safe_declarations)
+                + "; }"
+            )
+
+    return "\n".join(output)
