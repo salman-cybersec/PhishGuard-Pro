@@ -3,6 +3,13 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.table import Table
+from threading import Thread
+import time
+
+import uvicorn
+
+from phishguard.config import APP_HOST, APP_PORT
+from phishguard.server import app
 
 from phishguard.banner import show_banner, show_service_catalog
 from phishguard.database import initialize_database
@@ -270,41 +277,79 @@ def website_import_menu():
             console.print("[red]Invalid option.[/red]")
 
 
+def start_backend():
+    """Run the FastAPI backend in a managed background thread."""
+    config = uvicorn.Config(
+        app, host=APP_HOST, port=APP_PORT,
+        log_level="warning", access_log=False,
+    )
+    server = uvicorn.Server(config)
+    thread = Thread(target=server.run, name="phishguard-api", daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if server.started:
+            console.print(f"[green]Backend running: http://{APP_HOST}:{APP_PORT}[/green]")
+            console.print(f"[cyan]Admin dashboard: http://{APP_HOST}:{APP_PORT}/admin[/cyan]")
+            return server, thread
+        if not thread.is_alive():
+            raise RuntimeError(
+                f"Backend stopped during startup. Check whether port {APP_PORT} is in use."
+            )
+        time.sleep(0.1)
+
+    server.should_exit = True
+    thread.join(timeout=3)
+    raise RuntimeError("Backend startup timed out.")
+
+
+def stop_backend(server, thread):
+    """Request a graceful backend shutdown."""
+    server.should_exit = True
+    thread.join(timeout=10)
+    if thread.is_alive():
+        console.print("[yellow]Backend is still shutting down; check the process.[/yellow]")
+    else:
+        console.print("[dim]Backend stopped.[/dim]")
+
+
 def main():
     initialize_database()
     show_banner()
     show_service_catalog()
+    server = None
+    thread = None
 
-    while True:
-        show_menu()
-        choice = Prompt.ask("Select an option")
-
-        if choice == "0":
-            console.print("[yellow]Exiting PhishGuard Pro.[/yellow]")
-            break
-
-        elif choice == "1":
-            campaign_menu()
-
-        elif choice == "2":
-            analytics_menu()
-
-        elif choice == "5":
-            console.print(
-                "[cyan]PhishGuard Pro - Authorized Security Lab Toolkit[/cyan]"
-            )
-            console.print("[white]Developer: Salman Afzal[/white]")
-
-        elif choice == "6":
-            website_import_menu()
-
-        elif choice in {"3", "4"}:
-            console.print(
-                "[yellow]This module will be integrated in a future step.[/yellow]"
-            )
-
-        else:
-            console.print("[red]Invalid option. Try again.[/red]")
+    try:
+        server, thread = start_backend()
+        while True:
+            show_menu()
+            choice = Prompt.ask("Select an option")
+            if choice == "0":
+                console.print("[yellow]Exiting PhishGuard Pro.[/yellow]")
+                break
+            elif choice == "1":
+                campaign_menu()
+            elif choice == "2":
+                analytics_menu()
+            elif choice == "5":
+                console.print("[cyan]PhishGuard Pro - Authorized Security Lab Toolkit[/cyan]")
+                console.print("[white]Developer: Salman Afzal[/white]")
+                console.print(f"[white]Backend: http://{APP_HOST}:{APP_PORT}[/white]")
+            elif choice == "6":
+                website_import_menu()
+            elif choice in {"3", "4"}:
+                console.print("[yellow]This module is not available yet; it is not enabled.[/yellow]")
+            else:
+                console.print("[red]Invalid option. Try again.[/red]")
+    except (RuntimeError, OSError) as error:
+        console.print(f"[bold red]Startup error: {error}[/bold red]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Shutdown requested.[/yellow]")
+    finally:
+        if server is not None and thread is not None:
+            stop_backend(server, thread)
 
 
 if __name__ == "__main__":
