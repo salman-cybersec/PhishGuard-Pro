@@ -291,7 +291,7 @@ def start_backend():
     while time.monotonic() < deadline:
         if server.started:
             console.print(f"[green]Backend running: http://{APP_HOST}:{APP_PORT}[/green]")
-            console.print(f"[cyan]Admin dashboard: http://{APP_HOST}:{APP_PORT}/admin[/cyan]")
+            console.print(f"[cyan]Admin dashboard: http://{APP_HOST}:{APP_PORT}/admin/login[/cyan]")
             return server, thread
         if not thread.is_alive():
             raise RuntimeError(
