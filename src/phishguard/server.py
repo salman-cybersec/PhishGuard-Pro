@@ -30,7 +30,6 @@ from phishguard.audit import (
 )
 from phishguard.rate_limit import enforce_rate_limit
 from phishguard.request_limits import RequestSizeLimitMiddleware
-from phishguard.banner import show_banner, show_service_catalog
 
 from phishguard.training_submission import router as training_router
 from phishguard.training_routes import router as training_page_router
@@ -63,8 +62,6 @@ ASSET_CONTENT_TYPES = {
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_database()
-    show_banner()
-    show_service_catalog()
     yield
 
 
