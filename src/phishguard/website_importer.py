@@ -14,6 +14,19 @@ MAX_HTML_SIZE = 2_000_000
 def analyze_website(url: str) -> str:
     authorization = validate_website_authorization(url)
 
+    requested_hostname = urlsplit(url).hostname
+    authorized_hostname = authorization.get("hostname")
+
+    if (
+        not isinstance(authorized_hostname, str)
+        or not requested_hostname
+        or authorized_hostname.rstrip(".").lower()
+        != requested_hostname.rstrip(".").lower()
+    ):
+        raise ValueError(
+            "Authorized hostname does not match the requested website."
+        )
+
     response = fetch_https(
         url=url,
         expected_host=authorization["hostname"],

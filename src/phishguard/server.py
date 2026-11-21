@@ -5,7 +5,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from phishguard.config import (
@@ -86,7 +86,13 @@ app.add_middleware(
 @app.middleware("http")
 async def rate_limit_middleware(request, call_next):
     if request.url.path != "/health":
-        enforce_rate_limit(request)
+        try:
+            enforce_rate_limit(request)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
 
     response = await call_next(request)
     return response

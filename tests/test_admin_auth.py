@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from phishguard.auth import (
     ADMIN_SESSION_COOKIE,
+    ADMIN_SESSION_MAX_AGE,
     _sessions,
     _sessions_lock,
     verify_api_key,
@@ -144,3 +145,65 @@ def test_api_key_rejects_incorrect_key(monkeypatch):
 
     with pytest.raises(Exception):
         verify_api_key(x_api_key="B" * 40)
+
+
+def test_expired_admin_session_is_rejected(monkeypatch):
+    import phishguard.auth as auth
+
+    app = FastAPI()
+
+    @app.get("/protected")
+    def protected(
+        authenticated: bool = Depends(verify_admin_session),
+    ):
+        return {"authenticated": authenticated}
+
+    client = TestClient(app)
+
+    fake_time = [1000.0]
+    monkeypatch.setattr(auth.time, "time", lambda: fake_time[0])
+
+    token = create_admin_session()
+    client.cookies.set(ADMIN_SESSION_COOKIE, token)
+
+    # Session is valid before its 30-minute expiry.
+    assert client.get("/protected").status_code == 200
+
+    # Move beyond the expiry time.
+    fake_time[0] += ADMIN_SESSION_MAX_AGE + 1
+
+    response = client.get("/protected")
+
+    assert response.status_code == 401
+    assert "expired" in response.json()["detail"].lower()
+
+    client.close()
+
+
+def test_api_key_requires_configuration(monkeypatch):
+    monkeypatch.delenv("PHISHGUARD_API_KEY", raising=False)
+
+    with pytest.raises(Exception) as exc:
+        verify_api_key(x_api_key="A" * 40)
+
+    assert getattr(exc.value, "status_code", None) == 503
+
+
+@pytest.mark.parametrize(
+    "invalid_key",
+    [
+        "short",
+        "A" * 257,
+        "A" * 39 + "!",
+    ],
+)
+def test_api_key_rejects_invalid_configuration(
+    monkeypatch,
+    invalid_key,
+):
+    monkeypatch.setenv("PHISHGUARD_API_KEY", invalid_key)
+
+    with pytest.raises(Exception) as exc:
+        verify_api_key(x_api_key=invalid_key)
+
+    assert getattr(exc.value, "status_code", None) == 503

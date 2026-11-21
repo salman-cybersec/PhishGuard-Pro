@@ -92,9 +92,13 @@ DATABASE_URL = os.getenv(
 ).strip()
 
 
-LOCAL_PREVIEW_BASE_URL = (
-    f"http://127.0.0.1:{APP_PORT}"
-)
+LOCAL_PREVIEW_BASE_URL = os.getenv(
+    "PHISHGUARD_BASE_URL",
+    f"http://127.0.0.1:{APP_PORT}",
+).strip().rstrip("/")
+
+if not LOCAL_PREVIEW_BASE_URL.startswith(("http://", "https://")):
+    raise ValueError("PHISHGUARD_BASE_URL must use HTTP or HTTPS.")
 
 PREVIEW_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9_-]{24}$"

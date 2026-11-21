@@ -21,6 +21,10 @@ from phishguard.website_authorization import (
 )
 from phishguard.website_manager import import_website
 from phishguard.config import build_preview_url
+from phishguard.security_analyzer import analyze_website
+from phishguard.full_scan import analyze_full_website
+from phishguard.security_scan_store import save_security_scan
+from phishguard.security_report import export_security_html_report, export_security_json_report
 
 
 console = Console()
@@ -156,6 +160,214 @@ def analytics_menu():
         console.print(f"[red]Error: {error}[/red]")
     except RuntimeError as error:
         console.print(f"[red]Application error: {error}[/red]")
+
+
+def security_testing_menu():
+    while True:
+        console.print(
+            Panel(
+                "[bold cyan]1.[/bold cyan] Analyze HTTPS Website\n"
+                "[bold cyan]2.[/bold cyan] Analyzer Information\n"
+                "[bold cyan]3.[/bold cyan] Full Security Scan\n"
+                "[bold red]0.[/bold red] Back",
+                title="[bold white]SECURITY TESTING[/bold white]",
+                border_style="bright_blue",
+            )
+        )
+
+        choice = Prompt.ask("Select an option")
+
+        if choice == "0":
+            break
+
+        elif choice == "2":
+            console.print("[cyan]Website Security Analyzer[/cyan]")
+            console.print("Checks HTTPS TLS certificate and security headers.")
+            console.print("Resolves the hostname and blocks non-public IPs.")
+            console.print("Does not exploit vulnerabilities or follow redirects.")
+            console.print("Use only websites you own or are authorized to test.")
+
+        elif choice == "1":
+            url = Prompt.ask("Enter authorized HTTPS website URL")
+
+            try:
+                result = analyze_website(url)
+
+                table = Table(title="Website Security Analysis")
+                table.add_column("Metric", style="cyan")
+                table.add_column("Result")
+
+                table.add_row("Hostname", result["hostname"])
+                table.add_row("HTTP Status", str(result["http_status"]))
+                table.add_row("Resolved IPs", ", ".join(result["resolved_ips"]))
+                table.add_row("TLS Version", str(result["tls"]["version"]))
+                table.add_row("Certificate Expiry", str(result["tls"]["expires_at"]))
+                table.add_row("Days Remaining", str(result["tls"]["days_remaining"]))
+                table.add_row("Security Headers Present", ", ".join(result["headers"]["present"]) or "None")
+                table.add_row("Security Headers Missing", ", ".join(result["headers"]["missing"]) or "None")
+                table.add_row("Risk Level", result["risk_level"].upper())
+                table.add_row("Security Score", f"{result['security_score']['score']}/100")
+                table.add_row("Security Grade", result["security_score"]["grade"])
+                table.add_row("Critical Findings", str(result["security_score"]["breakdown"]["critical"]))
+                table.add_row("High Findings", str(result["security_score"]["breakdown"]["high"]))
+                table.add_row("Medium Findings", str(result["security_score"]["breakdown"]["medium"]))
+                table.add_row("Low Findings", str(result["security_score"]["breakdown"]["low"]))
+                table.add_row("Total Findings", str(result["summary"]["total"]))
+
+                console.print(table)
+
+                if result["findings"]:
+                    findings_table = Table(title="Security Findings")
+                    findings_table.add_column("Severity")
+                    findings_table.add_column("Finding")
+                    findings_table.add_column("Recommended Fix")
+
+                    for finding in result["findings"]:
+                        findings_table.add_row(
+                            finding["severity"].upper(),
+                            finding["finding"],
+                            finding.get(
+                                "remediation",
+                                "Review and apply an appropriate security fix.",
+                            ),
+                        )
+
+                    console.print(findings_table)
+                else:
+                    console.print("[green]No findings detected by these checks.[/green]")
+
+                save_report = Prompt.ask(
+                    "Export HTML security report?",
+                    choices=["y", "n"],
+                    default="n",
+                )
+
+                html_report_path = None
+                json_report_path = None
+
+                if save_report == "y":
+                    html_report = export_security_html_report(result)
+                    html_report_path = html_report["html_report"]
+                    console.print(
+                        f"[green]HTML report saved:[/green] "
+                        f"{html_report_path}"
+                    )
+
+                save_json = Prompt.ask(
+                    "Export JSON security report?",
+                    choices=["y", "n"],
+                    default="n",
+                )
+
+                if save_json == "y":
+                    json_report = export_security_json_report(result)
+                    json_report_path = json_report["json_report"]
+                    console.print(
+                        f"[green]JSON report saved:[/green] "
+                        f"{json_report_path}"
+                    )
+
+                scan_id = save_security_scan(
+                    result,
+                    html_report_path=html_report_path,
+                    json_report_path=json_report_path,
+                )
+                console.print(
+                    f"[green]Scan history saved. Scan ID: {scan_id}[/green]"
+                )
+
+            except (ValueError, RuntimeError, OSError) as error:
+                console.print(f"[red]Analysis failed: {error}[/red]")
+
+        elif choice == "3":
+            url = Prompt.ask("Enter authorized HTTPS website URL")
+
+            scan_mode = Prompt.ask(
+                "Select scan depth",
+                choices=["fast", "extended", "thorough"],
+                default="fast",
+            )
+
+            try:
+                result = analyze_full_website(url, scan_mode=scan_mode)
+                score = result["security_score"]
+                summary = result["summary"]
+                subdomains = result["checks"].get("subdomains", {})
+
+                table = Table(title="Full Website Security Scan")
+                table.add_column("Metric", style="cyan")
+                table.add_column("Result")
+
+                table.add_row("Hostname", result["hostname"])
+                table.add_row("Scan Mode", scan_mode.title())
+                table.add_row("Risk Level", result["risk_level"].upper())
+                table.add_row("Security Score", f"{score['score']}/100")
+                table.add_row("Security Grade", score["grade"])
+                table.add_row("Critical Findings", str(summary.get("critical", 0)))
+                table.add_row("High Findings", str(summary.get("high", 0)))
+                table.add_row("Medium Findings", str(summary.get("medium", 0)))
+                table.add_row("Low Findings", str(summary.get("low", 0)))
+                table.add_row("Total Findings", str(summary.get("total", 0)))
+                table.add_row("Subdomains Discovered", str(subdomains.get("total_discovered", 0)))
+                table.add_row("Subdomains Processed", str(subdomains.get("total_processed", 0)))
+                table.add_row("Subdomains Resolved", str(subdomains.get("total_resolved", 0)))
+                table.add_row("Subdomains Unresolved", str(subdomains.get("total_unresolved", 0)))
+                table.add_row("Subdomain Results Truncated", str(subdomains.get("truncated", False)))
+
+                console.print(table)
+
+                if result["findings"]:
+                    findings_table = Table(title="Full Scan Findings")
+                    findings_table.add_column("Severity")
+                    findings_table.add_column("Finding")
+                    findings_table.add_column("Recommended Fix")
+
+                    for finding in result["findings"]:
+                        findings_table.add_row(
+                            str(finding.get("severity", "")).upper(),
+                            str(finding.get("finding", "")),
+                            str(finding.get("remediation", "Review finding.")),
+                        )
+
+                    console.print(findings_table)
+                else:
+                    console.print("[green]No findings detected by these checks.[/green]")
+
+                html_report_path = None
+                json_report_path = None
+
+                if Prompt.ask(
+                    "Export HTML security report?",
+                    choices=["y", "n"],
+                    default="n",
+                ) == "y":
+                    report = export_security_html_report(result)
+                    html_report_path = report["html_report"]
+                    console.print(f"[green]HTML report saved:[/green] {html_report_path}")
+
+                if Prompt.ask(
+                    "Export JSON security report?",
+                    choices=["y", "n"],
+                    default="n",
+                ) == "y":
+                    report = export_security_json_report(result)
+                    json_report_path = report["json_report"]
+                    console.print(f"[green]JSON report saved:[/green] {json_report_path}")
+
+                scan_id = save_security_scan(
+                    result,
+                    html_report_path=html_report_path,
+                    json_report_path=json_report_path,
+                )
+                console.print(
+                    f"[green]Full Scan history saved. Scan ID: {scan_id}[/green]"
+                )
+
+            except (ValueError, RuntimeError, OSError) as error:
+                console.print(f"[red]Full Scan failed: {error}[/red]")
+
+        else:
+            console.print("[red]Invalid option. Try again.[/red]")
 
 
 def website_import_menu():
@@ -339,8 +551,10 @@ def main():
                 console.print(f"[white]Backend: http://{APP_HOST}:{APP_PORT}[/white]")
             elif choice == "6":
                 website_import_menu()
-            elif choice in {"3", "4"}:
-                console.print("[yellow]This module is not available yet; it is not enabled.[/yellow]")
+            elif choice == "3":
+                security_testing_menu()
+            elif choice == "4":
+                console.print("[yellow]Report generation module is not available yet.[/yellow]")
             else:
                 console.print("[red]Invalid option. Try again.[/red]")
     except (RuntimeError, OSError) as error:

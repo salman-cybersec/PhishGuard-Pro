@@ -48,7 +48,7 @@ def test_database_integrity_is_valid(
     assert database.verify_database_integrity() is True
 
 
-def test_database_version_is_three(
+def test_database_version_is_five(
     monkeypatch,
     tmp_path,
 ):
@@ -56,7 +56,7 @@ def test_database_version_is_three(
 
     database.initialize_database()
 
-    assert database.get_database_version() == 3
+    assert database.get_database_version() == 5
 
 
 def test_initialize_database_adds_missing_columns(

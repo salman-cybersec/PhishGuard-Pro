@@ -10,18 +10,18 @@ router = APIRouter()
 
 
 @router.get(
-    "/training/{campaign_reference}",
+    "/training/{campaign_id}",
     response_class=HTMLResponse,
 )
 def show_training_page(
-    campaign_reference: str,
+    campaign_id: str,
     service_id: str | None = Query(default=None),
     scenario_id: str | None = Query(default=None),
 ):
     if (
-        not isinstance(campaign_reference, str)
-        or not campaign_reference
-        or len(campaign_reference) > 100
+        not isinstance(campaign_id, str)
+        or not campaign_id
+        or len(campaign_id) > 100
     ):
         raise HTTPException(
             status_code=400,
@@ -38,12 +38,12 @@ def show_training_page(
                 WHERE tracking_code = ?
                   AND status = 'active'
                 """,
-                (campaign_reference,),
+                (campaign_id,),
             ).fetchone()
 
             # Backward compatibility for existing numeric campaign links.
-            if campaign is None and campaign_reference.isdecimal():
-                campaign_id = int(campaign_reference)
+            if campaign is None and campaign_id.isdecimal():
+                campaign_id = int(campaign_id)
 
                 if campaign_id <= 0:
                     raise HTTPException(

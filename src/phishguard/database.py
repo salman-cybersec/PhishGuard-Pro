@@ -9,7 +9,7 @@ from phishguard.config import (
 
 DATABASE_PATH = DATA_DIR / "phishguard.db"
 DATABASE_TIMEOUT = 10
-DATABASE_VERSION = 3
+DATABASE_VERSION = 5
 
 
 @contextmanager
@@ -153,6 +153,25 @@ def initialize_database():
 
             CREATE INDEX IF NOT EXISTS idx_events_campaign_created
             ON events(campaign_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS security_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_url TEXT NOT NULL CHECK(length(target_url) <= 2048),
+                hostname TEXT NOT NULL CHECK(length(hostname) <= 253),
+                security_score INTEGER NOT NULL
+                    CHECK(security_score BETWEEN 0 AND 100),
+                grade TEXT NOT NULL CHECK(grade IN ('A', 'B', 'C', 'D', 'F')),
+                risk_level TEXT NOT NULL
+                    CHECK(risk_level IN ('low', 'medium', 'high')),
+                findings_json TEXT NOT NULL,
+                result_json TEXT,
+                html_report_path TEXT,
+                json_report_path TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_security_scans_created
+            ON security_scans(created_at);
         """)
 
         # Migrate existing databases before creating dependent indexes.
@@ -170,13 +189,20 @@ def initialize_database():
             "INTEGER NOT NULL DEFAULT 0 CHECK(consent_activity IN (0,1))",
         )
 
+        _add_column_if_missing(
+            connection,
+            "security_scans",
+            "result_json",
+            "TEXT",
+        )
+
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_participant
             ON events(participant_id)
         """)
 
         connection.execute(
-            "PRAGMA user_version=3"
+            "PRAGMA user_version=5"
         )
 
 

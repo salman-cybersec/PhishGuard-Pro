@@ -218,3 +218,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PhishGuard Pro - local private data
+/data/*.db
+/data/*.db-*
+/reports/
+
+# Local backup and recovery files
+*.bak
+*.backup-*
+
+# Local ImageMagick-generated artifacts
+/ipaddress
+/socket
+/ssl

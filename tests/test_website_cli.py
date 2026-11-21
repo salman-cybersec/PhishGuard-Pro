@@ -40,7 +40,7 @@ def test_website_import_rejects_unauthorized_domain(monkeypatch, capsys):
         Mock(side_effect=ValueError("Domain not authorized")),
     )
 
-    responses = iter(["1", "0"])
+    responses = iter(["1", "https://unauthorized.example", "0"])
 
     monkeypatch.setattr(
         cli.Prompt,

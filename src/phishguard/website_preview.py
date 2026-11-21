@@ -220,8 +220,6 @@ def create_safe_preview(
 font-family:Arial,sans-serif;text-align:center;">
 <strong>AUTHORIZED SECURITY AWARENESS SIMULATION</strong>
 <br>
-This is a sanitized static preview. No passwords or credentials
-are collected.
 </div>
 <div class="phishguard-preview">
 {safe_content}

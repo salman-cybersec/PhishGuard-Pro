@@ -1,3 +1,5 @@
+from phishguard.website_preview import create_safe_preview
+
 
 def test_preview_removes_event_handler_attributes():
     result = create_safe_preview(

@@ -1,5 +1,7 @@
 
 from html import escape
+import json
+import datetime as dt
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -20,8 +22,856 @@ from phishguard.auth import (
     revoke_admin_session,
 )
 
+from phishguard.login_throttle import (
+    check_login_allowed,
+    record_login_failure,
+    clear_login_failures,
+)
+
+
+from phishguard.security_analyzer import analyze_website, validate_target_url
+from phishguard.security_scan_store import save_security_scan
+from phishguard.full_scan import analyze_full_website
+from phishguard.domain_intelligence import analyze_domain_intelligence
+from phishguard.dns_security import analyze_dns_security
+from phishguard.network_intelligence import analyze_network_addresses
+from phishguard.subdomain_discovery import discover_subdomains
 
 router = APIRouter()
+
+
+
+
+
+def _render_dns_security(result):
+    sections = []
+
+    for key in ("spf", "dmarc", "caa", "mx", "dkim"):
+        item = result.get(key, {})
+        status = item.get("status", "unavailable").replace("_", " ").title()
+        records = item.get("records", [])
+
+        rows = []
+        if records:
+            for record in records:
+                rows.append(
+                    f"<tr><td>{escape(str(record))}</td></tr>"
+                )
+        else:
+            rows.append(
+                '<tr><td class="muted">No record data available</td></tr>'
+            )
+
+        sections.append(
+            f"<section><h2>{key.upper()}</h2>"
+            f'<p class="status">Status: {escape(status)}</p>'
+            "<table><tbody>" + "".join(rows) + "</tbody></table></section>"
+        )
+
+    findings = result.get("findings", [])
+    finding_rows = []
+
+    for item in findings:
+        severity = escape(str(item.get("severity", "info")).upper())
+        finding = escape(str(item.get("finding", "")))
+        evidence = escape(str(item.get("evidence", "")))
+        remediation = escape(str(item.get("remediation", "")))
+
+        finding_rows.append(
+            f"<tr><td>{severity}</td><td>{finding}</td>"
+            f"<td>{evidence}</td><td>{remediation}</td></tr>"
+        )
+
+    if not finding_rows:
+        finding_rows.append(
+            '<tr><td colspan="4">No security findings identified by these checks.</td></tr>'
+        )
+
+    summary = result.get("summary", {})
+
+    summary_html = (
+        f'<div class="summary">'
+        f'<div><strong>{summary.get("total_findings", 0)}</strong><span>Total findings</span></div>'
+        f'<div><strong>{summary.get("high", 0)}</strong><span>High</span></div>'
+        f'<div><strong>{summary.get("medium", 0)}</strong><span>Medium</span></div>'
+        f'<div><strong>{summary.get("low", 0)}</strong><span>Low</span></div>'
+        f'</div>'
+    )
+
+    findings_html = (
+        "<section><h2>Security Findings</h2>"
+        "<table><thead><tr><th>Severity</th><th>Finding</th>"
+        "<th>Evidence</th><th>Remediation</th></tr></thead>"
+        "<tbody>" + "".join(finding_rows) + "</tbody></table></section>"
+    )
+
+    return summary_html + "".join(sections) + findings_html
+
+
+def _render_domain_intelligence(result):
+    def table(title, records):
+        rows = []
+        for item in records:
+            if isinstance(item, dict):
+                value = " | ".join(
+                    f"{escape(str(key))}: {escape(str(val))}"
+                    for key, val in item.items()
+                )
+            else:
+                value = escape(str(item))
+            rows.append(f"<tr><td>{value}</td></tr>")
+
+        if not rows:
+            rows.append('<tr><td class="muted">No records disclosed</td></tr>')
+
+        return (
+            f"<section><h2>{escape(title)}</h2>"
+            "<table><tbody>" + "".join(rows) + "</tbody></table></section>"
+        )
+
+    sections = []
+    dns = result.get("dns", {})
+
+    for record_type in ("A", "AAAA", "MX", "NS", "TXT", "CAA"):
+        item = dns.get(record_type, {})
+        status = item.get("status", "unavailable")
+        sections.append(
+            table(
+                f"{record_type} Records — {status.replace('_', ' ').title()}",
+                item.get("records", []),
+            )
+        )
+
+    email = result.get("email_security", {})
+    for key in ("spf", "dmarc"):
+        item = email.get(key, {})
+        sections.append(
+            table(
+                f"{key.upper()} — {item.get('status', 'unavailable').replace('_', ' ').title()}",
+                item.get("records", []),
+            )
+        )
+
+    registration = result.get("registration", {})
+    registration_rows = [
+        {"Field": "Lookup status", "Value": registration.get("status", "unavailable")},
+        {"Field": "Registrar", "Value": registration.get("registrar") or "Not disclosed"},
+        {"Field": "Registration date", "Value": registration.get("registration_date") or "Not disclosed"},
+        {"Field": "Expiration date", "Value": registration.get("expiration_date") or "Not disclosed"},
+        {"Field": "Last changed", "Value": registration.get("last_changed") or "Not disclosed"},
+    ]
+    sections.append(table("Domain Registration (RDAP)", registration_rows))
+
+    sections.append(table("IP Addresses", result.get("ip_addresses", [])))
+    sections.append(table("Hosting / DNS Provider Indicators", result.get("hosting_indicators", [])))
+
+    return "".join(sections)
+
+def _render_network_intelligence(results):
+    sections = []
+
+    for item in results:
+        rows = [
+            ("IP Address", item.get("address", "Unknown")),
+            ("IP Version", item.get("version", "Unknown")),
+            ("Public Address", "Yes" if item.get("is_global") else "No"),
+            ("Private Address", "Yes" if item.get("is_private") else "No"),
+        ]
+
+        asn_data = item.get("asn", {})
+        for record in asn_data.get("records", []):
+            rows.extend([
+                ("ASN", record.get("asn", "Not available")),
+                ("Network Prefix", record.get("network", "Not available")),
+                ("Country", record.get("country", "Not available")),
+                ("Registry", record.get("registry", "Not available")),
+                ("Allocation Date", record.get("allocation_date", "Not available")),
+                ("Network Organization", record.get("organization", "Not disclosed")),
+            ])
+
+        ptr_data = item.get("reverse_dns", {})
+        ptr_records = ptr_data.get("records", [])
+        rows.append(("Reverse DNS (PTR)", ", ".join(ptr_records) if ptr_records else ptr_data.get("status", "Unavailable")))
+
+        table_rows = "".join(
+            f"<tr><th>{escape(str(label))}</th><td>{escape(str(value))}</td></tr>"
+            for label, value in rows
+        )
+
+        sections.append(
+            f"<section><h2>{escape(str(item.get('address', 'IP Address')))}</h2>"
+            f"<table>{table_rows}</table></section>"
+        )
+
+    if not sections:
+        return "<p>No public IP addresses were resolved for this hostname.</p>"
+
+    return "".join(sections)
+
+
+def _render_subdomain_discovery(result):
+    rows = []
+
+    for item in result.get("subdomains", []):
+        dns = item.get("dns", {})
+        addresses = dns.get("A", []) + dns.get("AAAA", [])
+        address_text = ", ".join(addresses) if addresses else "No public DNS address found"
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(item.get('hostname', '')))}</td>"
+            f"<td>{escape(address_text)}</td>"
+            f"<td>{escape(str(dns.get('status', 'unknown')))}</td>"
+            f"<td>{escape(', '.join(item.get('sources', [])))}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        return "<p>No subdomains were returned by the discovery source.</p>"
+
+    return (
+        "<table><thead><tr><th>Subdomain</th><th>Public IP Addresses</th>"
+        "<th>DNS Status</th><th>Evidence Source</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def _render_technology_section(result):
+    if not isinstance(result, dict):
+        return (
+            '<section class="technology-section">'
+            '<h2>Technology Intelligence</h2>'
+            '<p>Technology details are unavailable for this older scan.</p>'
+            '</section>'
+        )
+
+    data = result.get("technologies", {})
+    if not isinstance(data, dict):
+        data = {}
+
+    technologies = data.get("technologies", [])
+    if not isinstance(technologies, list):
+        technologies = []
+
+    cards = []
+    for item in technologies:
+        if not isinstance(item, dict):
+            continue
+
+        name = escape(str(item.get("name") or "Unknown"))
+        category = escape(str(item.get("category") or "Uncategorized"))
+        version = escape(str(item.get("version") or "Not exposed"))
+        confidence = str(item.get("confidence") or "Unconfirmed")
+        evidence = item.get("evidence", [])
+
+        if isinstance(evidence, list):
+            evidence_items = [
+                f"<li>{escape(str(value))}</li>"
+                for value in evidence
+            ]
+        else:
+            evidence_items = [
+                f"<li>{escape(str(evidence))}</li>"
+            ]
+
+        confidence_class = confidence.lower()
+        if confidence_class not in ("high", "medium", "low"):
+            confidence_class = "unknown"
+
+        cards.append(
+            '<article class="tech-card">'
+            '<div class="tech-card-top">'
+            f'<span class="tech-category">{category}</span>'
+            f'<span class="tech-confidence {confidence_class}">'
+            f'{escape(confidence)}</span>'
+            '</div>'
+            f'<h3>{name}</h3>'
+            f'<p class="tech-version">Version: <strong>{version}</strong></p>'
+            '<div class="tech-evidence-title">Detection evidence</div>'
+            f'<ul>{"".join(evidence_items)}</ul>'
+            '</article>'
+        )
+
+    count = len(cards)
+
+    if not cards:
+        content = (
+            '<div class="tech-empty">'
+            '<div class="tech-empty-icon">&#128269;</div>'
+            '<h3>No technologies confirmed</h3>'
+            '<p>No matching fingerprints were found in the fetched page response.</p>'
+            '<small>This does not mean the website has no framework, language or CMS. '
+            'Some technologies may be hidden or loaded outside the scanned response.</small>'
+            '</div>'
+        )
+    else:
+        content = '<div class="tech-grid">' + "".join(cards) + '</div>'
+
+    return (
+        '<section class="technology-section">'
+        '<div class="tech-heading">'
+        '<div><span class="tech-eyebrow">WEBSITE INTELLIGENCE</span>'
+        '<h2>Technology Stack</h2>'
+        '<p>Technologies identified from publicly exposed fingerprints.</p></div>'
+        f'<div class="tech-total"><strong>{count}</strong>'
+        '<span>Detected</span></div>'
+        '</div>'
+        f'{content}'
+        '<p class="tech-disclaimer">Versions are displayed only when exposed by the website. '
+        'Undetected or hidden technologies are not assumed.</p>'
+        '</section>'
+    )
+
+
+def _render_technical_details(result):
+    if not isinstance(result, dict):
+        return (
+            '<section class="detail-section">'
+            '<h2>Security Findings</h2>'
+            '<p>No technical details available.</p></section>'
+        )
+
+    findings = result.get("findings", [])
+    if not isinstance(findings, list):
+        findings = []
+
+    rows = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+
+        severity = str(item.get("severity", "info")).lower()
+        if severity not in {"critical", "high", "medium", "low"}:
+            severity = "info"
+
+        rows.append(
+            '<tr>'
+            f'<td>{escape(str(item.get("finding", "Unnamed finding")))}</td>'
+            f'<td><span class="severity severity-{severity}">'
+            f'{escape(severity.upper())}</span></td>'
+            f'<td>{escape(str(item.get("remediation", "Review manually")))}</td>'
+            '</tr>'
+        )
+
+    findings_table = "".join(rows) or (
+        '<tr><td colspan="3">No findings recorded.</td></tr>'
+    )
+
+    score_data = result.get("security_score", {})
+    if isinstance(score_data, dict):
+        score = score_data.get("score", "N/A")
+    else:
+        score = score_data if score_data is not None else "N/A"
+
+    return (
+        '<section class="detail-section">'
+        '<h2>Security Findings</h2>'
+        f'<p class="detail-score">Security Score: {escape(str(score))}/100</p>'
+        '<div class="table-wrap"><table class="findings-table">'
+        '<thead><tr><th>Finding</th><th>Severity</th>'
+        '<th>Recommended Remediation</th></tr></thead>'
+        f'<tbody>{findings_table}</tbody>'
+        '</table></div></section>'
+    )
+@router.get(
+    "/admin/security-scans/{scan_id}",
+    response_class=HTMLResponse,
+)
+def admin_view_security_scan(
+    scan_id: int,
+    admin=Depends(verify_admin_session),
+):
+    if scan_id < 1:
+        raise HTTPException(status_code=404, detail="Scan not found.")
+
+    with get_connection() as connection:
+        scan = connection.execute(
+            "SELECT * FROM security_scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+
+    if scan is None:
+        raise HTTPException(status_code=404, detail="Scan not found.")
+
+    try:
+        findings = json.loads(scan["findings_json"] or "[]")
+        if not isinstance(findings, list):
+            findings = []
+    except (TypeError, ValueError):
+        findings = []
+
+    result = None
+    if scan["result_json"]:
+        try:
+            parsed = json.loads(scan["result_json"])
+            if isinstance(parsed, dict):
+                result = parsed
+        except (TypeError, ValueError):
+            result = None
+
+    rows = []
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(item.get('finding') or item.get('title') or item.get('name') or 'Finding'))}</td>"
+            f"<td>{escape(str(item.get('severity', 'N/A')))}</td>"
+            f"<td>{escape(str(item.get('description') or item.get('evidence') or 'No description saved.'))}</td>"
+            f"<td>{escape(str(item.get('remediation') or 'No remediation details saved.'))}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        rows.append('<tr><td colspan="4">No findings were recorded.</td></tr>')
+
+    technical_html = _render_technical_details(result)
+
+    technology_html = _render_technology_section(result)
+
+    return HTMLResponse(f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>PhishGuard Pro - Scan {scan_id}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; background:#f4f6f9;
+                   color:#202938; margin:0; padding:30px; }}
+            main {{ max-width:1100px; margin:auto; background:white;
+                    padding:28px; border-radius:12px; }}
+            table {{ width:100%; border-collapse:collapse; margin-top:18px; }}
+            th,td {{ padding:12px; border:1px solid #ddd; text-align:left; }}
+            th {{ background:#edf2f7; }}
+            pre {{ white-space:pre-wrap; overflow-wrap:anywhere;
+                   background:#f3f5f7; padding:16px; border-radius:8px; }}
+            a {{ color:#1457a6; }}
+
+            .technology-section {{
+                margin: 28px 0;
+                padding: 24px;
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 16px;
+            }}
+            .tech-heading {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 16px;
+                margin-bottom: 22px;
+            }}
+            .tech-eyebrow {{
+                color: #2563eb;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1.4px;
+            }}
+            .tech-heading h2 {{
+                margin: 7px 0;
+                font-size: 24px;
+            }}
+            .tech-heading p, .tech-disclaimer {{
+                color: #64748b;
+                font-size: 13px;
+            }}
+            .tech-total {{
+                min-width: 85px;
+                padding: 12px;
+                text-align: center;
+                background: #eff6ff;
+                border-radius: 12px;
+            }}
+            .tech-total strong, .tech-total span {{
+                display: block;
+            }}
+            .tech-total strong {{
+                color: #1d4ed8;
+                font-size: 27px;
+            }}
+            .tech-total span {{
+                color: #475569;
+                font-size: 11px;
+            }}
+            .tech-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+                gap: 14px;
+            }}
+            .tech-card {{
+                padding: 18px;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                min-width: 0;
+            }}
+            .tech-card-top {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+            }}
+            .tech-category, .tech-confidence {{
+                padding: 5px 9px;
+                border-radius: 20px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            .tech-category {{
+                background: #e0e7ff;
+                color: #3730a3;
+            }}
+            .tech-confidence.high {{
+                background: #dcfce7;
+                color: #166534;
+            }}
+            .tech-confidence.medium {{
+                background: #fef3c7;
+                color: #92400e;
+            }}
+            .tech-confidence.low, .tech-confidence.unknown {{
+                background: #f1f5f9;
+                color: #475569;
+            }}
+            .tech-card h3 {{
+                margin: 17px 0 8px;
+                font-size: 18px;
+            }}
+            .tech-version {{
+                color: #64748b;
+                font-size: 13px;
+            }}
+            .tech-version strong {{
+                color: #334155;
+            }}
+            .tech-evidence-title {{
+                margin-top: 17px;
+                font-size: 12px;
+                font-weight: 700;
+                color: #334155;
+            }}
+            .tech-card ul {{
+                padding-left: 18px;
+                margin-bottom: 0;
+                color: #64748b;
+                font-size: 12px;
+                overflow-wrap: anywhere;
+            }}
+            .tech-card li {{
+                margin-top: 6px;
+            }}
+            .tech-empty {{
+                padding: 30px 18px;
+                text-align: center;
+                background: #f8fafc;
+                border: 1px dashed #cbd5e1;
+                border-radius: 12px;
+            }}
+            .tech-empty-icon {{
+                font-size: 30px;
+            }}
+            .tech-empty h3 {{
+                margin: 10px 0;
+            }}
+            .tech-empty p {{
+                color: #475569;
+            }}
+            .tech-empty small {{
+                display: block;
+                max-width: 580px;
+                margin: auto;
+                color: #64748b;
+                line-height: 1.6;
+            }}
+            .tech-disclaimer {{
+                margin: 18px 0 0;
+                line-height: 1.6;
+            }}
+
+
+        .period-filter {{ display:flex;align-items:center;gap:10px;margin-left:auto; }}
+        .period-filter label {{ font-size:12px;color:#71809a;font-weight:700; }}
+        .period-filter select {{ min-width:155px;padding:10px 34px 10px 12px;border:1px solid #dce3ef;border-radius:9px;background:#fff;color:#17233d;font-size:13px;font-weight:600;cursor:pointer; }}
+        @media(max-width:760px) {{ .period-filter {{ margin:10px 0;width:100%; }} .period-filter select {{ flex:1; }} }}
+      </style>
+    </head>
+    <body>
+    <main>
+        <h1>Website Security Scan Details</h1>
+        <p><strong>Scan ID:</strong> {escape(str(scan["id"]))}</p>
+        <p><strong>Website:</strong> {escape(str(scan["target_url"]))}</p>
+        <p><strong>Hostname:</strong> {escape(str(scan["hostname"]))}</p>
+        <p><strong>Security Score:</strong> {escape(str(scan["security_score"]))}/100</p>
+        <p><strong>Grade:</strong> {escape(str(scan["grade"]))}</p>
+        <p><strong>Risk Level:</strong> {escape(str(scan["risk_level"]).upper())}</p>
+        <p><strong>Scan Date:</strong> {escape(str(scan["created_at"]))}</p>
+        <h2>Findings and Remediation</h2>
+        <table>
+            <thead><tr>
+                <th>Finding</th><th>Severity</th>
+                <th>Description</th><th>Remediation</th>
+            </tr></thead>
+            <tbody>{''.join(rows)}</tbody>
+        </table>
+        {technology_html}
+        {technical_html}
+        <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main>
+    </body>
+    </html>
+    """)
+
+
+@router.post("/admin/security-scan", response_class=HTMLResponse)
+def admin_run_security_scan(
+    url: str = Form(..., max_length=2048),
+    authorized: str = Form(...),
+    scan_mode: str = Form("fast"),
+    admin=Depends(verify_admin_session),
+):
+    if authorized != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail="Authorization confirmation is required."
+        )
+
+    try:
+        result = analyze_website(url)
+        scan_id = save_security_scan(result)
+
+        score_data = result.get("security_score", {})
+        if isinstance(score_data, dict):
+            score = score_data.get("score", "N/A")
+            grade = score_data.get("grade", "N/A")
+            breakdown = score_data.get("breakdown", {})
+        else:
+            score = score_data
+            grade = result.get("grade", "N/A")
+            breakdown = {}
+
+        findings = result.get("findings", [])
+        finding_rows = []
+
+        for item in findings:
+            if not isinstance(item, dict):
+                continue
+            finding_rows.append(
+                "<tr>"
+            f"<td>{escape(str(item.get('finding') or item.get('title') or item.get('name') or 'Finding'))}</td>"
+                f"<td>{escape(str(item.get('severity', 'N/A')))}</td>"
+                f"<td>{escape(str(item.get('description', item.get('evidence', 'Security weakness detected.'))))}</td>"
+                f"<td>{escape(str(item.get('remediation', 'Review and remediate this finding.')))}</td>"
+                "</tr>"
+            )
+
+        if not finding_rows:
+            finding_rows.append(
+                '<tr><td colspan="4">No findings reported.</td></tr>'
+            )
+
+        details_html = _render_technical_details(result)
+        technology_html = _render_technology_section(result)
+
+        return HTMLResponse(f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>PhishGuard Pro - Scan Results</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; background:#f4f6f9;
+                       color:#202938; margin:0; padding:30px; }}
+                main {{ max-width:1100px; margin:auto; background:white;
+                        padding:28px; border-radius:12px; }}
+                .score {{ font-size:32px; font-weight:bold; }}
+                table {{ width:100%; border-collapse:collapse; margin-top:20px; }}
+                th,td {{ padding:12px; border:1px solid #ddd; text-align:left; }}
+                th {{ background:#edf2f7; }}
+                pre {{ white-space:pre-wrap; overflow-wrap:anywhere;
+                       background:#f3f5f7; padding:16px; border-radius:8px; }}
+                a {{ color:#1457a6; }}
+
+            .technology-section {{
+                margin: 28px 0;
+                padding: 24px;
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 16px;
+            }}
+            .tech-heading {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 16px;
+                margin-bottom: 22px;
+            }}
+            .tech-eyebrow {{
+                color: #2563eb;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1.4px;
+            }}
+            .tech-heading h2 {{
+                margin: 7px 0;
+                font-size: 24px;
+            }}
+            .tech-heading p, .tech-disclaimer {{
+                color: #64748b;
+                font-size: 13px;
+            }}
+            .tech-total {{
+                min-width: 85px;
+                padding: 12px;
+                text-align: center;
+                background: #eff6ff;
+                border-radius: 12px;
+            }}
+            .tech-total strong, .tech-total span {{
+                display: block;
+            }}
+            .tech-total strong {{
+                color: #1d4ed8;
+                font-size: 27px;
+            }}
+            .tech-total span {{
+                color: #475569;
+                font-size: 11px;
+            }}
+            .tech-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+                gap: 14px;
+            }}
+            .tech-card {{
+                padding: 18px;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                min-width: 0;
+            }}
+            .tech-card-top {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+            }}
+            .tech-category, .tech-confidence {{
+                padding: 5px 9px;
+                border-radius: 20px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            .tech-category {{
+                background: #e0e7ff;
+                color: #3730a3;
+            }}
+            .tech-confidence.high {{
+                background: #dcfce7;
+                color: #166534;
+            }}
+            .tech-confidence.medium {{
+                background: #fef3c7;
+                color: #92400e;
+            }}
+            .tech-confidence.low, .tech-confidence.unknown {{
+                background: #f1f5f9;
+                color: #475569;
+            }}
+            .tech-card h3 {{
+                margin: 17px 0 8px;
+                font-size: 18px;
+            }}
+            .tech-version {{
+                color: #64748b;
+                font-size: 13px;
+            }}
+            .tech-version strong {{
+                color: #334155;
+            }}
+            .tech-evidence-title {{
+                margin-top: 17px;
+                font-size: 12px;
+                font-weight: 700;
+                color: #334155;
+            }}
+            .tech-card ul {{
+                padding-left: 18px;
+                margin-bottom: 0;
+                color: #64748b;
+                font-size: 12px;
+                overflow-wrap: anywhere;
+            }}
+            .tech-card li {{
+                margin-top: 6px;
+            }}
+            .tech-empty {{
+                padding: 30px 18px;
+                text-align: center;
+                background: #f8fafc;
+                border: 1px dashed #cbd5e1;
+                border-radius: 12px;
+            }}
+            .tech-empty-icon {{
+                font-size: 30px;
+            }}
+            .tech-empty h3 {{
+                margin: 10px 0;
+            }}
+            .tech-empty p {{
+                color: #475569;
+            }}
+            .tech-empty small {{
+                display: block;
+                max-width: 580px;
+                margin: auto;
+                color: #64748b;
+                line-height: 1.6;
+            }}
+            .tech-disclaimer {{
+                margin: 18px 0 0;
+                line-height: 1.6;
+            }}
+
+            </style>
+        </head>
+        <body>
+        <main>
+            <h1>Website Security Scan Results</h1>
+            <p>Scan ID: {scan_id}</p>
+<p>Scan mode: {escape(str(result.get("scan_mode", "fast")).title())}</p>
+            <p>Website: {escape(str(result.get("url", url)))}</p>
+            <p class="score">Security Score: {escape(str(score))}/100</p>
+            <p>Grade: {escape(str(grade))}</p>
+            <p>Risk Level: {escape(str(result.get("risk_level", "N/A")))}</p>
+            <p>HTTP Status: {escape(str(result.get("http_status", "N/A")))}</p>
+            <h2>Findings and Remediation</h2>
+            <table>
+                <tr><th>Finding</th><th>Severity</th>
+                    <th>Description</th><th>Remediation</th></tr>
+                {''.join(finding_rows)}
+            </table>
+            {technology_html}
+            <h2>Technical Details</h2>
+            {details_html}
+            <p><a href="/admin/dashboard">Back to Admin Dashboard</a></p>
+        </main>
+        </body>
+        </html>
+        """)
+
+    except Exception as error:
+        safe_error = escape(f"{type(error).__name__}: {error}")
+        return HTMLResponse(
+            "<h2>Scan could not be completed.</h2>"
+            f"<p><strong>Reason:</strong> {safe_error}</p>"
+            '<p><a href="/admin/dashboard">Back to Dashboard</a></p>',
+            status_code=400,
+        )
+
 
 
 def _login_page(message=""):
@@ -103,14 +953,6 @@ def _login_page(message=""):
                 <button type="submit">Sign in</button>
             </form>
         </main>
-        <script>
-            // Refresh consented participant telemetry and campaign metrics.
-            window.setInterval(() => {{
-                if (document.visibilityState === "visible") {{
-                    window.location.reload();
-                }}
-            }}, 10000);
-        </script>
     </body>
     </html>
     """
@@ -129,18 +971,22 @@ def admin_login(
     request: Request,
     password: str = Form(..., max_length=1024),
 ):
+    check_login_allowed(request)
+
     try:
         valid_credentials = verify_admin_credentials(password)
     except HTTPException:
         raise
 
     if not valid_credentials:
+        record_login_failure(request)
         return HTMLResponse(
             content=_login_page("Invalid username or password."),
             status_code=401,
             headers={"Cache-Control": "no-store"},
         )
 
+    clear_login_failures(request)
     token = create_admin_session()
 
     response = RedirectResponse(
@@ -245,12 +1091,642 @@ def admin_export_participants(campaign_id: int):
     )
 
 
+
+@router.get(
+    "/admin/phishing-links",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_phishing_links():
+    services = [
+        "Facebook", "Instagram", "TikTok", "Snapchat", "PayPal",
+        "Google", "Microsoft", "Netflix", "LinkedIn", "X",
+        "Amazon", "Apple", "Discord", "Telegram", "Steam",
+        "Spotify", "Yahoo", "Reddit", "Pinterest", "Twitch",
+        "Zoom", "Dropbox", "GitHub",
+    ]
+
+    cards = "".join(
+        f'<article class="service-card"><h3>{escape(name)}</h3>'
+        '<p>Authorized lab workspace</p>'
+        '<small>Workflow not yet implemented</small></article>'
+        for name in services
+    )
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phishing Links | PhishGuard Pro</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; padding: 32px; background: #f5f7fb;
+       color: #17233d; font-family: Arial, sans-serif; }}
+header {{ display: flex; justify-content: space-between;
+          align-items: center; gap: 16px; margin-bottom: 28px; }}
+h1 {{ margin: 0 0 8px; font-size: 27px; }}
+.subtitle {{ color: #64748b; }}
+.back {{ color: #2457c5; text-decoration: none; font-weight: 600; }}
+.services {{ display: grid; grid-template-columns:
+             repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }}
+.service-card {{ background: white; border: 1px solid #e2e8f0;
+                 border-radius: 12px; padding: 20px; }}
+.service-card h3 {{ margin: 0 0 12px; }}
+.service-card p {{ color: #64748b; margin: 0 0 10px; }}
+.service-card small {{ color: #b45309; }}
+</style>
+</head>
+<body>
+<header>
+<div><h1>Phishing Links</h1>
+<div class="subtitle">Authorized security-awareness lab services</div></div>
+<a class="back" href="/admin/dashboard">Back to Dashboard</a>
+</header>
+<div class="services">{cards}</div>
+</body>
+</html>"""
+
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+
+@router.get(
+    "/admin/new-scan",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_new_scan():
+    return HTMLResponse("""
+    <!doctype html><html lang="en"><head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhishGuard Pro - New Scan</title>
+    <style>
+    body{font-family:Arial;background:#f4f6f9;color:#202938;margin:0;padding:35px}
+    main{max-width:760px;margin:auto;background:white;padding:30px;border-radius:14px}
+    input{box-sizing:border-box;width:100%;padding:13px;margin:10px 0 18px;border:1px solid #ccd5e2;border-radius:8px}
+    button{background:#2458dc;color:white;border:0;padding:13px 22px;border-radius:8px;cursor:pointer}
+    a{color:#2458dc} .note{background:#f1f5ff;padding:14px;border-radius:8px;line-height:1.5}
+    </style></head><body><main>
+    <h1>New Website Security Scan</h1>
+    <p>Run a security assessment on a website you own or are authorized to test.</p>
+    <form method="post" action="/admin/security-scan">
+      <label for="url">Website URL</label>
+      <input id="url" name="url" type="url" placeholder="https://example.com" maxlength="2048" required>
+      <label><input type="checkbox" name="authorized" value="yes" required style="width:auto">
+      I confirm I own this website or have explicit permission to test it.</label>
+      <p><button type="submit">Start Security Scan</button></p>
+    </form>
+    <p class="note">Only scan authorized targets. Scan results will be saved in Scan Reports.</p>
+    <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+
+@router.post("/admin/full-scan/run", response_class=HTMLResponse)
+def admin_run_full_scan(
+    url: str = Form(..., max_length=2048),
+    authorized: str = Form(...),
+    admin=Depends(verify_admin_session),
+):
+    if authorized != "yes":
+        raise HTTPException(status_code=400, detail="Authorization confirmation is required.")
+
+    try:
+        result = analyze_full_website(url, scan_mode=scan_mode)
+        scan_id = save_security_scan(result)
+    except (ValueError, RuntimeError) as error:
+        return HTMLResponse(
+            "<h1>Full Scan could not be completed</h1>"
+            f"<p>{escape(str(error))}</p>"
+            "<a href='/admin/full-scan'>Return</a>",
+            status_code=400,
+        )
+    except Exception:
+        return HTMLResponse(
+            "<h1>Full Scan error</h1>"
+            "<p>Unexpected error. Check application logs.</p>"
+            "<a href='/admin/full-scan'>Return</a>",
+            status_code=500,
+        )
+
+    score = result["security_score"]
+    summary = result["summary"]
+
+    rows = []
+    for item in result["findings"]:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(item.get('severity', '')).upper())}</td>"
+            f"<td>{escape(str(item.get('finding', '')))}</td>"
+            f"<td>{escape(str(item.get('remediation', 'Review finding.')))}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        rows.append("<tr><td colspan='3'>No findings reported.</td></tr>")
+
+    checks = []
+    for name, data in result.get("checks", {}).items():
+        checks.append(
+            "<tr>"
+            f"<td>{escape(name.replace('_', ' ').title())}</td>"
+            f"<td><pre>{escape(json.dumps(data, indent=2, default=str))}</pre></td>"
+            "</tr>"
+        )
+
+    return HTMLResponse(f"""
+    <!doctype html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Full Scan Results</title>
+    <style>
+    body{{font-family:Arial;background:#f4f6f9;color:#202938;padding:25px}}
+    main{{max-width:1100px;margin:auto;background:white;padding:25px;border-radius:12px}}
+    table{{width:100%;border-collapse:collapse;margin:18px 0}}
+    th,td{{padding:11px;border:1px solid #ddd;text-align:left;vertical-align:top}}
+    th{{background:#edf2f7}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}
+    a{{color:#2458dc}}
+    </style></head><body><main>
+    <h1>Full Security Scan Results</h1>
+    <p>Target: {escape(result['url'])}</p>
+    <p>Scan ID: {scan_id}</p>
+    <h2>Score: {score['score']}/100 — Grade {escape(score['grade'])}</h2>
+    <p>Risk: {escape(result['risk_level'].upper())}</p>
+    <h2>Subdomain Processing</h2>
+    <p>Discovered: {result.get("checks", {}).get("subdomains", {}).get("total_discovered", 0)} |
+    Processed: {result.get("checks", {}).get("subdomains", {}).get("total_processed", 0)} |
+    Resolved: {result.get("checks", {}).get("subdomains", {}).get("total_resolved", 0)} |
+    Unresolved: {result.get("checks", {}).get("subdomains", {}).get("total_unresolved", 0)} |
+    Truncated: {result.get("checks", {}).get("subdomains", {}).get("truncated", False)}</p>
+    <p>Critical: {summary.get('critical', 0)} |
+    High: {summary.get('high', 0)} |
+    Medium: {summary.get('medium', 0)} |
+    Low: {summary.get('low', 0)} |
+    Total: {summary.get('total', 0)}</p>
+    <h2>Findings</h2>
+    <table><tr><th>Severity</th><th>Finding</th><th>Remediation</th></tr>
+    {''.join(rows)}</table>
+    <h2>Individual Check Results</h2>
+    <table><tr><th>Check</th><th>Details</th></tr>
+    {''.join(checks)}</table>
+    <p><a href="/admin/security-scans/{scan_id}">Open Saved Report</a></p>
+    <p><a href="/admin/full-scan">Run Another Scan</a> |
+    <a href="/admin/scan-reports">Scan Reports</a> |
+    <a href="/admin/dashboard">Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+@router.get(
+    "/admin/full-scan",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_full_scan():
+    return HTMLResponse("""
+    <!doctype html><html lang="en"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhishGuard Pro - Full Scan</title>
+    <style>body{font-family:Arial;background:#f4f6f9;color:#202938;padding:35px}
+    main{max-width:760px;margin:auto;background:white;padding:30px;border-radius:14px}
+    a{color:#2458dc}</style></head><body><main>
+    <h1>Full Security Scan</h1>
+    <p>Run combined passive checks on a website you own or are authorized to test.</p>
+    <form method="post" action="/admin/full-scan/run">
+      <label for="url">Authorized HTTPS Website URL</label>
+      <input id="url" name="url" type="url" maxlength="2048"
+        placeholder="https://example.com" required
+        style="box-sizing:border-box;width:100%;padding:13px;margin:12px 0">
+      <label for="scan_mode">Scan depth</label>
+      <select id="scan_mode" name="scan_mode"
+        style="box-sizing:border-box;width:100%;padding:12px;margin:12px 0">
+        <option value="fast" selected>Fast — up to 50 subdomains</option>
+        <option value="extended">Extended — up to 200 subdomains</option>
+        <option value="thorough">Thorough — up to 500 subdomains</option>
+      </select>
+      <p><label><input type="checkbox" name="authorized" value="yes" required>
+      I confirm I own this website or have explicit permission to test it.</label></p>
+      <button type="submit">Run Full Scan</button>
+    </form>
+    <p>Checks: HTTPS/TLS, security headers, technologies, cookies, SPF, DMARC and passive subdomain discovery.</p>
+    <p>Results are saved automatically in Scan Reports.</p>
+    <p><a href="/admin/new-scan">Open New Scan</a></p>
+    <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+@router.get(
+    "/admin/scan-reports",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_scan_reports():
+    with get_connection() as connection:
+        scans = connection.execute(
+            """
+            SELECT id, hostname, target_url, security_score,
+                   grade, risk_level, created_at
+            FROM security_scans
+            ORDER BY id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+
+    rows = []
+    for scan in scans:
+        rows.append(
+            "<tr>"
+            f'<td>{escape(str(scan["id"]))}</td>'
+            f'<td>{escape(str(scan["hostname"] or "—"))}</td>'
+            f'<td>{escape(str(scan["target_url"] or "—"))}</td>'
+            f'<td>{escape(str(scan["security_score"] or "—"))}</td>'
+            f'<td>{escape(str(scan["grade"] or "—"))}</td>'
+            f'<td>{escape(str(scan["risk_level"] or "—"))}</td>'
+            f'<td>{escape(str(scan["created_at"] or "—"))}</td>'
+            f'<td><a href="/admin/security-scans/{int(scan["id"])}">View</a></td>'
+            "</tr>"
+        )
+
+    table_rows = "".join(rows) or '<tr><td colspan="8">No saved scans yet.</td></tr>'
+
+    return HTMLResponse(f"""
+    <!doctype html><html lang="en"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhishGuard Pro - Scan Reports</title>
+    <style>
+    body{{font-family:Arial;background:#f4f6f9;color:#202938;padding:30px}}
+    main{{max-width:1200px;margin:auto;background:white;padding:25px;border-radius:14px;overflow:auto}}
+    table{{width:100%;border-collapse:collapse;margin-top:20px}}
+    th,td{{padding:12px;border-bottom:1px solid #e5eaf1;text-align:left;font-size:13px}}
+    th{{background:#f1f5f9}} a{{color:#2458dc}}
+    </style></head><body><main>
+    <h1>Scan Reports</h1>
+    <p>Saved website security assessments (latest 100 records).</p>
+    <table><thead><tr>
+    <th>ID</th><th>Hostname</th><th>Website</th><th>Score</th>
+    <th>Grade</th><th>Risk</th><th>Date</th><th>Report</th>
+    </tr></thead><tbody>{table_rows}</tbody></table>
+    <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+
+@router.get(
+    "/admin/security-tools",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_security_tools():
+    return HTMLResponse("""
+    <!doctype html><html lang="en"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhishGuard Pro - Security Tools</title>
+    <style>
+    body{font-family:Arial;background:#f4f6f9;color:#202938;padding:25px}
+    main{max-width:900px;margin:auto;background:white;padding:30px;border-radius:14px}
+    .tool{padding:17px;margin:12px 0;border:1px solid #dce3ed;border-radius:10px}
+    input,select{box-sizing:border-box;width:100%;padding:12px;margin:9px 0 16px}
+    button{padding:12px 20px;background:#2458dc;color:white;border:0;border-radius:7px;cursor:pointer}
+    a{color:#2458dc}
+    label{font-weight:bold}
+    .note{color:#596579;font-size:14px}
+    </style></head><body><main>
+    <h1>Security Tools</h1>
+    <p>Run an individual passive security check on a website you own or are authorized to test.</p>
+    <form method="post" action="/admin/security-tools/run">
+      <label for="url">Authorized HTTPS Website</label>
+      <input id="url" name="url" type="url" maxlength="2048"
+        placeholder="https://example.com" required>
+      <label for="tool">Select Security Tool</label>
+      <select id="tool" name="tool" required>
+        <option value="tls">TLS / SSL Certificate Checker</option>
+        <option value="headers">Security Headers Analyzer</option>
+        <option value="dns">DNS / SPF / DMARC Checker</option>
+        <option value="cookies">Cookie Security Analyzer</option>
+        <option value="technology">Technology Detector</option>
+        <option value="domain">Domain Intelligence (DNS / RDAP / IP)</option>
+        <option value="network">IP &amp; Network Intelligence (ASN / PTR)</option>
+        <option value="subdomains">Subdomain Discovery (Certificate Transparency)</option>
+      </select>
+      <p><label><input type="checkbox" name="authorized" value="yes"
+        required style="width:auto"> I confirm I own this website or have explicit permission to test it.</label></p>
+      <button type="submit">Run Selected Tool</button>
+    </form>
+    <div class="tool"><h3>TLS / SSL Checker</h3><p>Certificate validity, expiry and TLS version.</p></div>
+    <div class="tool"><h3>Security Headers Analyzer</h3><p>Checks important browser security response headers.</p></div>
+    <div class="tool"><h3>DNS / SPF / DMARC Checker</h3><p>Checks email domain authentication records.</p></div>
+    <div class="tool"><h3>Cookie Security Analyzer</h3><p>Checks Secure, HttpOnly and SameSite cookie flags.</p></div>
+    <div class="tool"><h3>Technology Detector</h3><p>Passively identifies technologies exposed by the website.</p></div>
+    <p class="note">These are passive checks. No exploitation, brute force or destructive testing is performed.</p>
+    <p><a href="/admin/full-scan">Full Scan</a> |
+    <a href="/admin/scan-reports">Scan Reports</a> |
+    <a href="/admin/dashboard">Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+@router.post("/admin/security-tools/run", response_class=HTMLResponse)
+def admin_run_security_tool(
+    url: str = Form(..., max_length=2048),
+    tool: str = Form(...),
+    authorized: str = Form(...),
+    admin=Depends(verify_admin_session),
+):
+    if authorized != "yes":
+        raise HTTPException(status_code=400, detail="Authorization confirmation is required.")
+
+    tool_names = {
+        "tls": ("TLS / SSL Certificate Checker", "tls"),
+        "headers": ("Security Headers Analyzer", "headers"),
+        "dns": ("DNS / SPF / DMARC Checker", "dns"),
+        "cookies": ("Cookie Security Analyzer", "cookies"),
+        "technology": ("Technology Detector", "technologies"),
+    }
+
+    if tool == "subdomains":
+        try:
+            parsed, hostname = validate_target_url(url)
+            result = discover_subdomains(hostname)
+            rendered = _render_subdomain_discovery(result)
+
+            return HTMLResponse(f"""
+            <!doctype html><html lang="en"><head><meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Subdomain Discovery - PhishGuard Pro</title>
+            <style>
+            body{{font-family:Arial,sans-serif;background:#f4f6f9;color:#202938;padding:24px}}
+            main{{max-width:1100px;margin:auto;background:white;padding:28px;border-radius:14px}}
+            table{{width:100%;border-collapse:collapse;margin-top:20px}}
+            th,td{{padding:12px;text-align:left;border-bottom:1px solid #e8edf3;overflow-wrap:anywhere}}
+            th{{background:#f1f5f9}} a{{color:#2458dc;text-decoration:none}}
+            .meta{{color:#596579;line-height:1.8}}
+            </style></head><body><main>
+            <h1>Subdomain Discovery</h1>
+            <p class="meta"><strong>Target:</strong> {escape(url)}<br>
+            <strong>Domain:</strong> {escape(hostname)}<br>
+            <strong>Discovery source:</strong> Certificate Transparency<br>
+            <strong>Discovered:</strong> {result["total_discovered"]}<br>
+            <strong>Currently DNS-resolved:</strong> {result["total_resolved"]}<br>
+            <strong>Source status:</strong> {escape(result["source_status"])}</p>
+            {rendered}
+            <p class="meta">Certificate records are historical evidence. DNS resolution indicates current public DNS data; unresolved names are not confirmed active assets.</p>
+            <p><a href="/admin/security-tools">Run Another Tool</a> |
+            <a href="/admin/full-scan">Full Scan</a> |
+            <a href="/admin/dashboard">Dashboard</a></p>
+            </main></body></html>
+            """)
+
+        except (ValueError, RuntimeError, OSError) as error:
+            return HTMLResponse(
+                "<h1>Subdomain Discovery could not complete</h1>"
+                f"<p>{escape(str(error))}</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=400,
+            )
+        except Exception:
+            return HTMLResponse(
+                "<h1>Subdomain Discovery Error</h1>"
+                "<p>Unexpected error. Check application logs.</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=500,
+            )
+
+    if tool == "network":
+        try:
+            import socket
+
+            parsed, hostname = validate_target_url(url)
+            resolved = socket.getaddrinfo(
+                hostname, None, type=socket.SOCK_STREAM
+            )
+            addresses = sorted({
+                item[4][0] for item in resolved
+            })
+
+            results = analyze_network_addresses(addresses)
+            rendered = _render_network_intelligence(results)
+
+            return HTMLResponse(f"""
+            <!doctype html><html lang="en"><head><meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>IP &amp; Network Intelligence - PhishGuard Pro</title>
+            <style>
+            body{{font-family:Arial,sans-serif;background:#f4f6f9;color:#202938;padding:24px}}
+            main{{max-width:1100px;margin:auto;background:white;padding:28px;border-radius:14px}}
+            section{{margin:22px 0;padding:18px;border:1px solid #e1e7ef;border-radius:10px}}
+            table{{width:100%;border-collapse:collapse}}
+            th,td{{padding:11px;text-align:left;border-bottom:1px solid #e8edf3;overflow-wrap:anywhere}}
+            th{{width:30%;color:#596579;background:#f8fafc}}
+            h1{{margin-bottom:8px}} a{{color:#2458dc;text-decoration:none}}
+            .meta{{color:#596579;line-height:1.8}}
+            .tag{{display:inline-block;background:#edf3ff;color:#2458dc;padding:6px 10px;border-radius:20px;font-size:12px}}
+            </style></head><body><main>
+            <span class="tag">PASSIVE NETWORK ASSESSMENT</span>
+            <h1>IP &amp; Network Intelligence</h1>
+            <p class="meta"><strong>Target:</strong> {escape(url)}<br>
+            <strong>Hostname:</strong> {escape(hostname)}<br>
+            <strong>Resolved IP addresses:</strong> {len(addresses)}</p>
+            {rendered}
+            <p class="meta">Network information is based on public ASN and reverse DNS records.</p>
+            <p><a href="/admin/security-tools">Run Another Tool</a> |
+            <a href="/admin/full-scan">Full Scan</a> |
+            <a href="/admin/dashboard">Dashboard</a></p>
+            </main></body></html>
+            """)
+
+        except (ValueError, RuntimeError, OSError, socket.gaierror) as error:
+            return HTMLResponse(
+                "<h1>Network Intelligence could not complete</h1>"
+                f"<p>{escape(str(error))}</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=400,
+            )
+        except Exception:
+            return HTMLResponse(
+                "<h1>Network Intelligence Error</h1>"
+                "<p>Unexpected error. Check application logs.</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=500,
+            )
+
+
+    if tool == "dns":
+        try:
+            parsed, hostname = validate_target_url(url)
+            result = analyze_dns_security(hostname)
+            rendered = _render_dns_security(result)
+
+            return HTMLResponse(f"""
+            <!doctype html><html lang="en"><head><meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>DNS Security Assessment - PhishGuard Pro</title>
+            <style>
+            body{{font-family:Arial,sans-serif;background:#f4f6f9;color:#202938;padding:24px}}
+            main{{max-width:1150px;margin:auto;background:white;padding:28px;border-radius:14px}}
+            section{{margin:22px 0;padding:18px;border:1px solid #e1e7ef;border-radius:10px}}
+            h1{{margin-bottom:8px}} h2{{font-size:18px;margin-top:0}}
+            table{{width:100%;border-collapse:collapse}}
+            th,td{{padding:11px;text-align:left;border-bottom:1px solid #e8edf3;
+            overflow-wrap:anywhere;font-size:13px;vertical-align:top}}
+            th{{background:#f1f5f9}} .muted{{color:#718096}}
+            .meta{{color:#596579;line-height:1.8}}
+            .status{{color:#596579;font-size:13px}}
+            .summary{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:22px 0}}
+            .summary div{{background:#f1f5f9;padding:16px;border-radius:9px}}
+            .summary strong,.summary span{{display:block}}
+            .summary strong{{font-size:24px;margin-bottom:5px}}
+            .summary span{{font-size:12px;color:#596579}}
+            a{{color:#2458dc;text-decoration:none}}
+            @media(max-width:650px){{.summary{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+            </style></head><body><main>
+            <h1>DNS Security Assessment</h1>
+            <p class="meta"><strong>Target:</strong> {escape(url)}<br>
+            <strong>Domain:</strong> {escape(hostname)}<br>
+            <strong>Assessment:</strong> Passive DNS checks</p>
+            {rendered}
+            <p class="meta">DKIM is checked only when a selector is supplied. No selector is guessed.</p>
+            <p><a href="/admin/security-tools">Run Another Tool</a> |
+            <a href="/admin/full-scan">Full Scan</a> |
+            <a href="/admin/dashboard">Dashboard</a></p>
+            </main></body></html>
+            """)
+
+        except (ValueError, RuntimeError, OSError) as error:
+            return HTMLResponse(
+                "<h1>DNS Security Assessment could not complete</h1>"
+                f"<p>{escape(str(error))}</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=400,
+            )
+        except Exception:
+            return HTMLResponse(
+                "<h1>DNS Security Assessment Error</h1>"
+                "<p>Unexpected error. Check application logs.</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=500,
+            )
+
+    if tool == "domain":
+        try:
+            parsed, hostname = validate_target_url(url)
+            result = analyze_domain_intelligence(hostname)
+            rendered = _render_domain_intelligence(result)
+            target_url = escape(url)
+            safe_hostname = escape(hostname)
+
+            return HTMLResponse(f"""
+            <!doctype html><html lang="en"><head><meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Domain Intelligence - PhishGuard Pro</title>
+            <style>
+            body{{font-family:Arial,sans-serif;background:#f4f6f9;color:#202938;padding:24px}}
+            main{{max-width:1100px;margin:auto;background:white;padding:28px;border-radius:14px}}
+            section{{margin:24px 0;padding:18px;border:1px solid #e1e7ef;border-radius:10px}}
+            h1{{margin-bottom:8px}} h2{{font-size:19px;margin-top:0}}
+            table{{width:100%;border-collapse:collapse}}
+            td{{padding:11px;border-bottom:1px solid #e8edf3;overflow-wrap:anywhere;font-size:14px}}
+            tr:last-child td{{border-bottom:0}}
+            .muted{{color:#718096}}
+            .meta{{color:#596579;line-height:1.7}}
+            a{{color:#2458dc;text-decoration:none}}
+            .tag{{display:inline-block;background:#edf3ff;color:#2458dc;padding:6px 10px;border-radius:20px;font-size:12px}}
+            </style></head><body><main>
+            <span class="tag">PASSIVE DOMAIN ASSESSMENT</span>
+            <h1>Domain Intelligence</h1>
+            <div class="meta"><strong>Target:</strong> {target_url}<br>
+            <strong>Hostname:</strong> {safe_hostname}<br>
+            <strong>Data source:</strong> Public DNS records and RDAP</div>
+            {rendered}
+            Missing or undisclosed records are not treated as confirmed vulnerabilities.</p>
+            <p><a href="/admin/security-tools">Run Another Tool</a> |
+            <a href="/admin/full-scan">Full Scan</a> |
+            <a href="/admin/dashboard">Dashboard</a></p>
+            </main></body></html>
+            """)
+
+        except (ValueError, RuntimeError, OSError) as error:
+            return HTMLResponse(
+                "<h1>Domain Intelligence could not complete</h1>"
+                f"<p>{escape(str(error))}</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=400,
+            )
+        except Exception:
+            return HTMLResponse(
+                "<h1>Domain Intelligence Error</h1>"
+                "<p>Unexpected error. Check application logs.</p>"
+                "<a href='/admin/security-tools'>Return to Security Tools</a>",
+                status_code=500,
+            )
+
+    if tool not in tool_names:
+        raise HTTPException(status_code=400, detail="Unknown security tool.")
+
+    try:
+        result = analyze_website(url)
+        title, _ = tool_names[tool]
+
+        result_fields = {
+            "tls": "tls",
+            "headers": "headers",
+            "cookies": "cookie_security",
+            "technology": "technologies",
+        }
+        details = result.get(result_fields[tool], {})
+        if not details:
+            details = {"message": "No data was returned for this check."}
+
+        rendered = escape(json.dumps(details, indent=2, default=str))
+        hostname = escape(str(result.get("hostname", "Unknown")))
+        target_url = escape(str(result.get("url", url)))
+
+        return HTMLResponse(f"""
+        <!doctype html><html><head><meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{escape(title)} - Results</title>
+        <style>
+        body{{font-family:Arial;background:#f4f6f9;color:#202938;padding:25px}}
+        main{{max-width:950px;margin:auto;background:white;padding:28px;border-radius:12px}}
+        pre{{background:#f1f5f9;padding:18px;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}}
+        a{{color:#2458dc}}
+        </style></head><body><main>
+        <h1>{escape(title)}</h1>
+        <p><strong>Target:</strong> {target_url}</p>
+        <p><strong>Hostname:</strong> {hostname}</p>
+        <h2>Tool Results</h2>
+        <pre>{rendered}</pre>
+        <p>Assessment completed using passive security checks.</p>
+        <p><a href="/admin/security-tools">Run Another Tool</a> |
+        <a href="/admin/full-scan">Full Scan</a> |
+        <a href="/admin/dashboard">Dashboard</a></p>
+        </main></body></html>
+        """)
+
+    except (ValueError, RuntimeError, OSError) as error:
+        return HTMLResponse(
+            "<h1>Security Tool could not complete</h1>"
+            f"<p>{escape(str(error))}</p>"
+            "<a href='/admin/security-tools'>Return to Security Tools</a>",
+            status_code=400,
+        )
+    except Exception:
+        return HTMLResponse(
+            "<h1>Security Tool Error</h1>"
+            "<p>Unexpected error. Check application logs.</p>"
+            "<a href='/admin/security-tools'>Return to Security Tools</a>",
+            status_code=500,
+        )
+
+
 @router.get(
     "/admin/dashboard",
     response_class=HTMLResponse,
     dependencies=[Depends(verify_admin_session)],
 )
-def admin_dashboard(request: Request, message: str = ""):
+def admin_dashboard(request: Request, message: str = "", period: str = "7d"):
     with get_connection() as connection:
         campaigns = connection.execute(
             """
@@ -259,6 +1735,55 @@ def admin_dashboard(request: Request, message: str = ""):
             ORDER BY id DESC
             """
         ).fetchall()
+
+        security_scans = connection.execute(
+            """
+            SELECT id, hostname, target_url, security_score,
+                   grade, risk_level, findings_json, created_at
+            FROM security_scans
+            ORDER BY id DESC
+            LIMIT 20
+            """
+        ).fetchall()
+
+        all_security_scans = connection.execute(
+            """
+            SELECT id, hostname, target_url, security_score,
+                   grade, risk_level, findings_json, created_at
+            FROM security_scans
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+    period = period if period in ("7d", "1m", "all") else "7d"
+    now = dt.datetime.utcnow()
+    days = 7 if period == "7d" else 30
+    if period != "all":
+        cutoff = now - dt.timedelta(days=days)
+        filtered_scans = []
+        for scan in all_security_scans:
+            try:
+                stamp = dt.datetime.fromisoformat(str(scan["created_at"]).replace("Z", "+00:00"))
+                if stamp.tzinfo:
+                    stamp = stamp.astimezone(dt.timezone.utc).replace(tzinfo=None)
+                if stamp >= cutoff:
+                    filtered_scans.append(scan)
+            except (TypeError, ValueError):
+                continue
+    else:
+        filtered_scans = list(all_security_scans)
+
+    security_scans = filtered_scans[:20]
+    period_filter_html = f"""
+      <form method="get" action="/admin/dashboard" class="period-filter">
+        <label for="period-select">Results period</label>
+        <select id="period-select" name="period" onchange="this.form.submit()">
+          <option value="7d" {"selected" if period == "7d" else ""}>Last 7 Days</option>
+          <option value="1m" {"selected" if period == "1m" else ""}>Last 1 Month</option>
+          <option value="all" {"selected" if period == "all" else ""}>All Time</option>
+        </select>
+      </form>
+    """
 
     campaign_cards = []
 
@@ -421,158 +1946,304 @@ def admin_dashboard(request: Request, message: str = ""):
             """
         )
 
+    scan_rows = []
+
+    for scan in security_scans:
+        try:
+            findings = json.loads(scan["findings_json"])
+            finding_count = len(findings) if isinstance(findings, list) else 0
+        except (TypeError, ValueError):
+            finding_count = 0
+
+        scan_rows.append(
+            f"""
+            <tr>
+                <td>{escape(str(scan["id"]))}</td>
+                <td>{escape(str(scan["hostname"]))}</td>
+                <td><span class="score-circle { "score-good" if int(scan["security_score"] or 0) >= 80 else "score-warning" if int(scan["security_score"] or 0) >= 60 else "score-risk" }">{escape(str(scan["security_score"]))}</span></td>
+                <td>{escape(str(scan["grade"]))}</td>
+                <td>{escape(str(scan["risk_level"]).upper())}</td>
+                <td>{finding_count}</td>
+                <td>{escape(str(scan["created_at"]))}</td>
+                <td><a href="/admin/security-scans/{escape(str(scan["id"]))}">View Details</a></td>
+            </tr>
+            """
+        )
+
+    scan_history = (
+        "\n".join(scan_rows)
+        if scan_rows
+        else '<tr><td colspan="8">No security scans recorded yet.</td></tr>'
+    )
+
     content = (
         "\n".join(campaign_cards)
         if campaign_cards
         else "<p>No campaigns available.</p>"
     )
 
+
+    service_items = [
+        ("facebook", "Facebook"), ("instagram", "Instagram"),
+        ("tiktok", "TikTok"), ("snapchat", "Snapchat"),
+        ("paypal", "PayPal"), ("google", "Google"),
+        ("microsoft", "Microsoft"), ("netflix", "Netflix"),
+        ("linkedin", "LinkedIn"), ("x", "X"),
+        ("amazon", "Amazon"), ("apple", "Apple"),
+        ("discord", "Discord"), ("telegram", "Telegram"),
+        ("steam", "Steam"), ("spotify", "Spotify"),
+        ("yahoo", "Yahoo"), ("reddit", "Reddit"),
+        ("pinterest", "Pinterest"), ("twitch", "Twitch"),
+        ("zoom", "Zoom"), ("dropbox", "Dropbox"),
+        ("github", "GitHub"),
+    ]
+
+    scores = [int(scan["security_score"] or 0) for scan in security_scans]
+    average_score = round(sum(scores) / len(scores)) if scores else 0
+    latest_score = scores[0] if scores else None
+    latest_host = escape(str(security_scans[0]["hostname"])) if security_scans else "No scan yet"
+
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for scan in security_scans:
+        try:
+            items = json.loads(scan["findings_json"] or "[]")
+        except (TypeError, ValueError):
+            items = []
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    severity = str(item.get("severity", "info")).lower()
+                    if severity in severity_counts:
+                        severity_counts[severity] += 1
+                    else:
+                        severity_counts["info"] += 1
+
+    total_findings = sum(severity_counts.values())
+    max_severity = max(severity_counts.values(), default=0) or 1
+    severity_bars = "".join(
+        f'<div class="bar-row"><span>{name.title()}</span>'
+        f'<div class="bar-track"><i class="bar-{name}" style="width:{count / max_severity * 100:.1f}%"></i></div>'
+        f'<strong>{count}</strong></div>'
+        for name, count in severity_counts.items()
+    )
+
+    score_class = (
+        "score-good" if latest_score is not None and latest_score >= 80
+        else "score-warning" if latest_score is not None and latest_score >= 60
+        else "score-risk"
+    )
+    score_html = (
+        f'<div class="hero-score {score_class}"><strong>{latest_score}</strong><span>OUT OF 100</span></div>'
+        if latest_score is not None
+        else '<div class="hero-score score-empty"><strong>—</strong><span>NO SCAN</span></div>'
+    )
+
+    service_cards = []
+    for service_id, service_name in service_items:
+        service_cards.append(
+            f'<details class="service-card" id="service-{service_id}">'
+            f'<summary><span class="service-icon">{escape(service_name[:1])}</span>'
+            f'<span>{escape(service_name)}</span><small>Lab workflow pending</small></summary>'
+            '<div class="service-info"><p>Dedicated authorized lab workspace.</p>'
+            '<p class="muted">This service-specific workflow is not implemented yet. No real-brand login clone or credential collection is provided.</p></div></details>'
+        )
+
+    scan_section = f"""
+        <div class="table-wrap"><table class="data-table">
+            <thead><tr><th>ID</th><th>Hostname</th><th>Score</th><th>Grade</th>
+            <th>Risk</th><th>Findings</th><th>Date</th><th>Report</th></tr></thead>
+            <tbody>{scan_history}</tbody>
+        </table></div>
+    """
+
+    strategy_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for scan in all_security_scans:
+        risk = str(scan["risk_level"] or "info").lower()
+        if risk not in strategy_counts:
+            risk = "info"
+        strategy_counts[risk] += 1
+
+    max_strategy = max(strategy_counts.values(), default=0) or 1
+    strategy_activity_rows = "".join(
+        f'<div class="activity-row"><strong>{name.title()}</strong>'
+        f'<div class="activity-track"><i style="width:{count / max_strategy * 100:.1f}%"></i></div>'
+        f'<span>{count} scans</span></div>'
+        for name, count in strategy_counts.items()
+    )
+    strategy_activity_html = (
+        '<div class="panel strategy-panel"><h3>Strategy Activity</h3>'
+        '<p class="muted">Recorded scans grouped by risk level</p>'
+        + strategy_activity_rows + '</div>'
+    )
+
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>PhishGuard Pro - Admin Dashboard</title>
-        <style>
-            * {{ box-sizing: border-box; }}
-            body {{
-                margin: 0;
-                padding: 30px;
-                background: #f4f6f9;
-                color: #202938;
-                font-family: Arial, sans-serif;
-            }}
-            header {{
-                max-width: 1100px;
-                margin: 0 auto 25px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                gap: 15px;
-            }}
-            h1 {{ margin-bottom: 8px; }}
-            .subtitle, .status, .last-activity {{ color: #64748b; }}
-            main {{ max-width: 1100px; margin: auto; }}
-            .campaign {{
-                background: white;
-                border: 1px solid #e2e8f0;
-                border-radius: 12px;
-                padding: 22px;
-                margin-bottom: 24px;
-            }}
-            .metrics {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-                gap: 12px;
-                margin: 22px 0;
-            }}
-            .metric {{
-                padding: 17px;
-                background: #f8fafc;
-                border: 1px solid #e2e8f0;
-                border-radius: 9px;
-            }}
-            .metric span {{
-                display: block;
-                color: #64748b;
-                font-size: 13px;
-                margin-bottom: 10px;
-            }}
-            .metric strong {{ font-size: 24px; }}
-            .table-wrap {{ overflow-x: auto; }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 12px;
-                font-size: 14px;
-            }}
-            th, td {{
-                text-align: left;
-                padding: 12px;
-                border-bottom: 1px solid #e2e8f0;
-            }}
-            th {{ background: #f8fafc; }}
-            .training-link {{ overflow-wrap: anywhere; }}
-            .campaign-actions {{ display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; align-items: center; }}
-            .campaign-actions form {{ margin: 0; }}
-            .campaign-actions button, .export-link {{
-                display: inline-block;
-                padding: 9px 13px;
-                border: 0;
-                border-radius: 7px;
-                background: #1e40af;
-                color: white;
-                text-decoration: none;
-                cursor: pointer;
-                font-size: 14px;
-            }}
-            .create-campaign {{
-                background: white;
-                border: 1px solid #e2e8f0;
-                border-radius: 12px;
-                padding: 20px;
-                margin-bottom: 24px;
-            }}
-            .create-campaign label {{ display: block; margin-bottom: 8px; font-weight: bold; }}
-            .create-campaign input {{
-                width: 100%;
-                max-width: 460px;
-                padding: 11px;
-                border: 1px solid #cbd5e1;
-                border-radius: 7px;
-                font-size: 16px;
-            }}
-            .create-campaign button {{
-                margin-top: 12px;
-                padding: 11px 16px;
-                border: 0;
-                border-radius: 7px;
-                background: #1e40af;
-                color: white;
-                cursor: pointer;
-            }}
-            .notice {{ color: #166534; }}
-            .logout button {{
-                padding: 10px 16px;
-                border: 0;
-                border-radius: 7px;
-                background: #1e40af;
-                color: white;
-                cursor: pointer;
-            }}
-            @media (max-width: 600px) {{
-                body {{ padding: 15px; }}
-                .campaign {{ padding: 15px; }}
-                header {{ align-items: flex-start; }}
-            }}
-        </style>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>PhishGuard Pro | Security Operations</title>
+      <style>
+        * {{ box-sizing:border-box; }}
+        :root {{ --navy:#101c36; --blue:#315efb; --ink:#17233d; --muted:#71809a; --line:#e6ebf3; --bg:#f4f7fc; }}
+        html {{ scroll-behavior:smooth; scroll-padding-top:24px; }}
+        body {{ margin:0; background:var(--bg); color:var(--ink); font-family:Inter,Arial,sans-serif; }}
+        .sidebar {{ position:fixed; inset:0 auto 0 0; width:252px; background:var(--navy); color:#fff; padding:26px 16px; overflow-y:auto; }}
+        .brand {{ display:flex; align-items:center; gap:12px; padding:0 10px 28px; border-bottom:1px solid #293652; }}
+        .brand-mark {{ width:40px; height:40px; display:grid; place-items:center; border-radius:12px; background:#315efb; font-weight:900; font-size:20px; }}
+        .brand strong {{ display:block; font-size:16px; letter-spacing:.2px; }}
+        .brand small {{ color:#9eacc5; font-size:10px; letter-spacing:1.2px; }}
+        .nav-label {{ margin:25px 10px 10px; color:#8291ac; font-size:10px; font-weight:800; letter-spacing:1.5px; }}
+        .nav-link {{ display:flex; align-items:center; gap:12px; padding:12px 13px; margin:4px 0; border-radius:9px; color:#c5cee0; text-decoration:none; font-size:13px; font-weight:600; }}
+        .nav-link:hover,.nav-link.active {{ background:#24365c; color:#fff; }}
+        .nav-link.active {{ box-shadow:inset 3px 0 #6d91ff; }}
+        .nav-icon {{ width:20px; text-align:center; color:#91aaff; }}
+        .sidebar-note {{ margin:30px 6px 0; padding:13px; border:1px solid #2c3c5b; border-radius:10px; color:#aebbd1; font-size:11px; line-height:1.6; }}
+        .workspace {{ margin-left:252px; padding:30px 34px 60px; max-width:1600px; }}
+        .topbar {{ display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:27px; }}
+        .eyebrow {{ color:var(--blue); font-size:10px; font-weight:800; letter-spacing:1.6px; }}
+        h1 {{ margin:6px 0; font-size:27px; letter-spacing:-.7px; }}
+        .subtitle,.muted {{ color:var(--muted); font-size:13px; }}
+        .logout button,.primary-btn {{ border:0; border-radius:9px; padding:11px 16px; background:var(--blue); color:white; font-weight:700; cursor:pointer; }}
+        .logout button {{ background:#fff; color:#33415d; border:1px solid var(--line); }}
+        .notice {{ padding:13px 16px; background:#e8f7ef; color:#167344; border:1px solid #c8ecd8; border-radius:10px; margin-bottom:20px; }}
+        .page-section {{ margin-bottom:30px; }}
+        .section-head {{ display:flex; align-items:end; justify-content:space-between; gap:14px; margin:0 0 16px; }}
+        .section-head h2 {{ margin:0 0 5px; font-size:19px; }}
+        .section-head p {{ margin:0; color:var(--muted); font-size:12px; }}
+        .panel,.stat-card,.welcome-card {{ background:#fff; border:1px solid var(--line); border-radius:15px; box-shadow:0 5px 20px rgba(23,35,61,.035); }}
+        .welcome-card {{ padding:24px; display:grid; grid-template-columns:1fr auto; align-items:center; gap:20px; background:linear-gradient(115deg,#fff 55%,#eef3ff); }}
+        .welcome-card h2 {{ margin:8px 0; font-size:21px; }}
+        .welcome-card p {{ color:var(--muted); font-size:13px; line-height:1.6; }}
+        .hero-score {{ width:126px; height:126px; border:9px solid currentColor; border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0; }}
+        .hero-score strong {{ font-size:37px; line-height:1; }}
+        .hero-score span {{ font-size:9px; font-weight:800; margin-top:7px; letter-spacing:1px; }}
+        .score-good {{ color:#15945c; background:#edfbf4; }}
+        .score-warning {{ color:#d97706; background:#fff8e9; }}
+        .score-risk {{ color:#dc4545; background:#fff0f0; }}
+        .score-empty {{ color:#8491a7; background:#f3f5f8; }}
+        .stats-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px; margin:17px 0; }}
+        .stat-card {{ padding:19px; }}
+        .stat-card span {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }}
+        .stat-card strong {{ display:block; margin-top:9px; font-size:29px; }}
+        .stat-card small {{ display:block; color:#9aa5b7; margin-top:5px; font-size:11px; }}
+        .chart-grid {{ display:grid; grid-template-columns:1.2fr 1fr; gap:16px; }}
+        .strategy-panel {{ margin-top:16px; }}
+        .activity-row {{ display:grid; grid-template-columns:90px 1fr 75px; gap:12px; align-items:center; margin:14px 0; font-size:13px; }}
+        .activity-track {{ height:9px; background:#edf1f7; border-radius:20px; overflow:hidden; }}
+        .activity-track i {{ display:block; height:100%; background:#315efb; border-radius:20px; }}
+
+        .panel {{ padding:21px; min-width:0; }}
+        .panel h3 {{ margin:0 0 7px; font-size:15px; }}
+        .bar-row {{ display:grid; grid-template-columns:80px 1fr 25px; align-items:center; gap:10px; margin:15px 0; font-size:11px; color:#65738b; }}
+        .bar-track {{ height:9px; border-radius:20px; background:#edf1f7; overflow:hidden; }}
+        .bar-track i {{ display:block; height:100%; border-radius:20px; }}
+        .bar-critical {{ background:#b42336; }} .bar-high {{ background:#ed5555; }}
+        .bar-medium {{ background:#f59e0b; }} .bar-low {{ background:#20a36a; }} .bar-info {{ background:#7c8ca8; }}
+        .quick-links {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:12px; }}
+        .quick-links a {{ padding:13px; border:1px solid var(--line); border-radius:9px; color:#3154b8; text-decoration:none; font-size:12px; font-weight:700; }}
+        .form-panel {{ max-width:760px; }}
+        .form-panel label {{ display:block; margin:15px 0 7px; font-size:12px; font-weight:700; }}
+        .form-panel input[type=url] {{ width:100%; padding:13px; border:1px solid #d5deeb; border-radius:9px; font-size:14px; }}
+        .checkline {{ display:flex; align-items:center; gap:9px; margin:14px 0; color:#596981; font-size:12px; }}
+        .info-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; }}
+        .info-tile {{ padding:17px; border:1px solid var(--line); border-radius:11px; background:#fff; }}
+        .info-tile strong {{ display:block; font-size:13px; margin-bottom:7px; }}
+        .info-tile p {{ margin:0; color:var(--muted); font-size:12px; line-height:1.6; }}
+        .service-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:11px; }}
+        .service-card {{ background:#fff; border:1px solid var(--line); border-radius:11px; overflow:hidden; }}
+        .service-card summary {{ display:flex; align-items:center; gap:10px; padding:13px; cursor:pointer; list-style:none; font-size:12px; font-weight:700; }}
+        .service-card summary::-webkit-details-marker {{ display:none; }}
+        .service-card summary small {{ margin-left:auto; color:#9a6a24; font-size:9px; font-weight:700; }}
+        .service-icon {{ width:31px; height:31px; display:grid; place-items:center; border-radius:9px; background:#edf2ff; color:#315efb; }}
+        .service-info {{ border-top:1px solid var(--line); padding:12px; font-size:11px; line-height:1.6; }}
+        .service-info p {{ margin:3px 0 8px; }}
+        .table-wrap {{ overflow-x:auto; }}
+        .data-table {{ width:100%; border-collapse:collapse; font-size:12px; min-width:760px; }}
+        .data-table th {{ text-align:left; padding:13px 11px; background:#f5f7fb; color:#61708a; font-size:10px; text-transform:uppercase; letter-spacing:.5px; }}
+        .data-table td {{ padding:13px 11px; border-bottom:1px solid #edf0f5; color:#42516a; }}
+        .data-table a {{ color:#315efb; font-weight:700; text-decoration:none; }}
+        .score-circle {{ display:inline-grid; place-items:center; width:42px; height:42px; border:3px solid currentColor; border-radius:50%; font-weight:800; }}
+        .severity {{ display:inline-block; padding:5px 8px; border-radius:20px; font-size:10px; font-weight:800; }}
+        .severity-critical,.severity-high {{ color:#a32332; background:#ffe5e7; }}
+        .severity-medium {{ color:#9a5700; background:#fff0d5; }}
+        .severity-low {{ color:#167344; background:#dcf8e9; }}
+        .severity-info {{ color:#52627a; background:#e9eef5; }}
+        .empty-state {{ padding:24px; color:var(--muted); text-align:center; font-size:13px; }}
+        @media(max-width:1050px) {{ .sidebar {{ width:215px; }} .workspace {{ margin-left:215px; padding:24px; }} .service-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
+        @media(max-width:760px) {{ .sidebar {{ position:static; width:auto; padding:15px; }} .brand {{ padding-bottom:13px; }} .nav-label {{ margin-top:14px; }} .sidebar nav {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }} .nav-link {{ margin:2px; padding:10px; }} .sidebar-note {{ display:none; }} .workspace {{ margin:0; padding:18px 14px 40px; }} .stats-grid,.chart-grid,.info-grid {{ grid-template-columns:1fr; }} .welcome-card {{ grid-template-columns:1fr auto; padding:17px; }} .hero-score {{ width:96px; height:96px; border-width:7px; }} .hero-score strong {{ font-size:29px; }} .service-grid {{ grid-template-columns:1fr; }} .topbar {{ align-items:flex-start; }} h1 {{ font-size:22px; }} }}
+        @media print {{ .sidebar,.logout,.no-print {{ display:none !important; }} .workspace {{ margin:0; padding:0; }} body {{ background:#fff; }} .panel,.stat-card,.welcome-card {{ box-shadow:none; break-inside:avoid; }} }}
+
+        .sidebar {{ transition: transform .25s ease; }}
+        .workspace {{ transition: margin-left .25s ease; }}
+        .sidebar-toggle {{
+            border:1px solid #dce3ef;
+            background:#fff;
+            color:#17233d;
+            border-radius:9px;
+            padding:9px 13px;
+            cursor:pointer;
+            font-size:18px;
+            margin-right:12px;
+        }}
+        body.sidebar-hidden .sidebar {{
+            transform:translateX(-110%);
+        }}
+        body.sidebar-hidden .workspace {{
+            margin-left:0;
+        }}
+</style>
     </head>
     <body>
-        <header>
-            <div>
-                <h1>PhishGuard Pro</h1>
-                <p class="subtitle">
-                    Security Awareness Campaign Dashboard
-                </p>
-            </div>
-            <form class="logout" method="post" action="/admin/logout">
-                <button type="submit">Log out</button>
-            </form>
-        </header>
-        <main>
-            {f'<p class="notice">{escape(message)}</p>' if message else ''}
-            <section class="create-campaign">
-                <h2>Create campaign</h2>
-                <form method="post" action="/admin/campaigns">
-                    <label for="campaign-name">Campaign name</label>
-                    <input id="campaign-name" name="name" type="text"
-                           minlength="1" maxlength="100" required>
-                    <button type="submit">Create campaign</button>
-                </form>
-            </section>
-            {content}
-        </main>
+      <aside class="sidebar">
+        <div class="brand"><div class="brand-mark">P</div><div><strong>PhishGuard Pro</strong><small>SECURITY OPERATIONS</small></div></div>
+        <div class="nav-label">WORKSPACE</div>
+        <nav>
+          <a class="nav-link active" href="/admin/dashboard"><span class="nav-icon">◈</span>Dashboard</a>
+          <a class="nav-link" href="/admin/new-scan"><span class="nav-icon">⌕</span>New Scan</a>
+          <a class="nav-link" href="/admin/full-scan"><span class="nav-icon">▦</span>Full Scan</a>
+          <a class="nav-link" href="/admin/phishing-links"><span class="nav-icon">◇</span>Phishing Links</a>
+          <a class="nav-link" href="/admin/scan-reports"><span class="nav-icon">▤</span>Scan Reports</a>
+          <a class="nav-link" href="/admin/security-tools"><span class="nav-icon">⚙</span>Security Tools</a>
+  <a class="nav-link" href="/admin/email-validator"><span class="nav-icon">✉</span>Email Validator</a>
+        </nav>
+        <div class="sidebar-note">Authorized security testing only. Scan systems you own or have explicit permission to assess.</div>
+      </aside>
+      <main class="workspace">
+        <div class="topbar">
+          <button type="button" class="sidebar-toggle no-print"
+            onclick="document.body.classList.toggle('sidebar-hidden')"
+            aria-label="Toggle sidebar" title="Open or close sidebar">☰</button>
+          {period_filter_html}
+          <div><div class="eyebrow">SECURITY CONTROL CENTER</div><h1>Dashboard Overview</h1><div class="subtitle">Monitor website security assessments and lab workspaces.</div></div>
+          <form class="logout no-print" method="post" action="/admin/logout"><button type="submit">Log out</button></form>
+        </div>
+        {f'<p class="notice">{escape(message)}</p>' if message else ''}
+        <section class="page-section" id="dashboard">
+          <div class="welcome-card">
+            <div><div class="eyebrow">LATEST SECURITY ASSESSMENT</div><h2>{latest_host}</h2>
+            <p>Latest recorded security score. Review scan history for detailed findings and remediation guidance.</p>
+            <a class="primary-btn" href="/admin/scan-reports" style="display:inline-block;text-decoration:none">View scan reports</a></div>
+            {score_html}
+          </div>
+          <div class="stats-grid">
+            <article class="stat-card"><span>Total scans shown</span><strong>{len(security_scans)}</strong><small>Latest 20 database records</small></article>
+            <article class="stat-card"><span>Average security score</span><strong>{average_score if scores else "—"}</strong><small>Across displayed scans</small></article>
+            <article class="stat-card"><span>Total findings</span><strong>{total_findings}</strong><small>Across displayed scan records</small></article>
+          </div>
+          <div class="chart-grid">
+            <div class="panel"><h3>Findings by severity</h3><p class="muted">Severity counts from the latest 20 scans</p>{severity_bars}</div>
+
+          </div>
+          {strategy_activity_html}
+          <div class="panel strategy-panel">
+            <h3>Saved Scan Results</h3>
+            <p class="muted">Previously recorded security scans</p>
+            {scan_section}
+          </div>
+        </section>
+
+      </main>
     </body>
     </html>
     """
@@ -581,3 +2252,5 @@ def admin_dashboard(request: Request, message: str = ""):
         content=html,
         headers={"Cache-Control": "no-store"},
     )
+from phishguard.email_validation import router as email_validator_router
+router.include_router(email_validator_router)

@@ -130,11 +130,14 @@ def render_training_page(
 
         <div class="notice">
             This is an authorized security-awareness simulation.
-            No real passwords, OTPs, verification codes or session
-            credentials are requested or collected.
+            No real passwords are requested or collected.
+            OTPs, verification codes and session credentials are never
+            requested or collected.
 
             Data collection choices are optional and explained below.
         </div>
+
+        <p>Authorized Security Awareness Simulation</p>
 
         <h3>{safe_name}</h3>
 
