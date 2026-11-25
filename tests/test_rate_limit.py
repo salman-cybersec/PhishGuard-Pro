@@ -47,6 +47,10 @@ def test_security_headers_are_present(client):
     assert response.headers["X-Frame-Options"] == "DENY"
     assert response.headers["Referrer-Policy"] == "no-referrer"
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Permissions-Policy"] == (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+    assert "Strict-Transport-Security" not in response.headers
 
 
 def test_rate_limiter_removes_inactive_ip_entries(monkeypatch):
@@ -107,3 +111,23 @@ def test_rate_limiter_preserves_active_ip_entries(monkeypatch):
     rate_limit.enforce_rate_limit(request)
 
     assert len(rate_limit._requests["192.0.2.30"]) == 2
+
+
+
+def test_hsts_header_is_present_for_https():
+    with TestClient(
+        app,
+        base_url="https://testserver",
+        raise_server_exceptions=False,
+    ) as https_client:
+        response = https_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.headers["Strict-Transport-Security"] == "max-age=31536000"
+
+
+def test_hsts_header_is_not_present_for_http(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert "Strict-Transport-Security" not in response.headers

@@ -9,39 +9,35 @@ console = Console()
 
 
 def show_banner():
-    logo = Text(
-        " ____  _     _ ____  _   _  __ _   ____  _   _  ____  ____  \n"
-        "|  _ \\| |__ (_) ___|| | | |/ _| | |  _ \\| | | |/ ___|/ ___| \n"
-        "| |_) | '_ \\| |\\___ \\| |_| | |_| | | |_) | | | |\\___ \\\\___ \\\n"
-        "|  __/| | | | | ___) |  _  |  _| | |  __/| |_| | ___) |___) |\n"
-        "|_|   |_| |_|_||____/|_| |_|_| |_| |_|    \\___/ |____/|____/ \n"
-        "\n"
-        "       ADVANCED SECURITY AWARENESS TOOLKIT\n"
-        "       Developer: Salman Afzal\n"
-        "       22 Supported Awareness Services\n",
-        style="bold cyan",
+    logo = Text()
+    logo.append("PHISHGUARD PRO\n", style="bold #FFB36B")
+    logo.append("AUTHORIZED RED TEAM TOOLKIT\n", style="bold white")
+    logo.append("Developer: Salman Afzal\n", style="white")
+    logo.append(
+        f"{len(list_services())} Supported Red Team Services",
+        style="bold red",
     )
 
     console.print(
         Panel(
             logo,
-            border_style="bright_blue",
-            title="[bold white]PHISHGUARD PRO[/bold white]",
-            subtitle="[dim]Authorized Lab Use Only[/dim]",
+            border_style="#FFB36B",
+            title="[bold white]SECURITY TOOLKIT[/bold white]",
+            subtitle="[dim white]Authorized Lab Use Only[/dim white]",
+            padding=(1, 3),
         )
     )
-
 
 def show_service_catalog():
     services = list_services()
     table = Table(
-        title=f"AVAILABLE TRAINING SERVICES ({len(services)})",
+        title=f"RED TEAM SERVICE CATALOG ({len(services)})",
         border_style="bright_blue",
         show_lines=False,
     )
     table.add_column("#", style="bold cyan", justify="right")
-    table.add_column("Service", style="white")
-    table.add_column("Awareness Scenarios", style="green")
+    table.add_column("Service", style="bold red")
+    table.add_column("Security Checks", style="white")
 
     for index, service in enumerate(services, start=1):
         scenarios = ", ".join(
@@ -52,5 +48,5 @@ def show_service_catalog():
 
     console.print(table)
     console.print(
-        "[dim]Training simulations only — no real passwords or credentials are collected.[/dim]"
+        "[dim]Authorized security assessments only — no real passwords or credentials are collected.[/dim]"
     )

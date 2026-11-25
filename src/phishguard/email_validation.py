@@ -9,7 +9,7 @@ from email_validator import validate_email, EmailNotValidError
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from phishguard.auth import verify_admin_session
+from phishguard.auth import verify_admin_session, verify_admin_origin
 
 router = APIRouter(prefix="/admin/email-validator", tags=["Email Validator"])
 
@@ -71,28 +71,62 @@ def page(content="", message=""):
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <title>Email Validator | PhishGuard Pro</title>
       <style>
-        *{{box-sizing:border-box}}
-        body{{margin:0;background:#f3f6fb;color:#17243a;font:15px Arial,sans-serif}}
-        header{{background:#101d35;color:white;padding:22px 30px}}
-        header strong{{font-size:20px}} header a{{color:#cbd8ed;text-decoration:none;float:right}}
-        main{{max-width:1100px;margin:28px auto;padding:0 18px}}
-        h1{{font-size:27px;margin:0 0 8px}} .muted{{color:#718096}}
-        .grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}
-        .card{{background:white;border:1px solid #e2e8f0;border-radius:13px;padding:22px;margin:18px 0;box-shadow:0 4px 16px #15243a0a}}
-        h2{{font-size:18px;margin:0 0 15px}}
-        textarea,input[type=email],input[type=file]{{width:100%;padding:12px;border:1px solid #ccd5e1;border-radius:8px;margin:8px 0 14px;font:inherit}}
-        textarea{{min-height:135px;resize:vertical}}
-        button{{background:#2459c4;color:white;border:0;border-radius:8px;padding:11px 17px;font-weight:600;cursor:pointer}}
-        button:hover{{background:#19469e}}
-        .notice{{background:#edf4ff;border:1px solid #c9dcff;padding:12px;border-radius:8px;color:#294d83;margin:14px 0}}
-        .stats{{display:flex;gap:10px;flex-wrap:wrap;margin:15px 0}}
-        .stat{{padding:10px 14px;border-radius:8px;background:#f1f5f9}}
-        .valid{{color:#087443}} .invalid{{color:#bd3030}} .unknown{{color:#946200}} .duplicate{{color:#6251a5}}
-        table{{width:100%;border-collapse:collapse;margin-top:12px}}
-        th,td{{padding:11px;text-align:left;border-bottom:1px solid #e7edf4;overflow-wrap:anywhere}}
-        th{{background:#f6f8fb}} .export{{display:inline-block;margin:8px 8px 0 0}}
-        @media(max-width:700px){{.grid{{grid-template-columns:1fr}}header a{{float:none;display:block;margin-top:10px}}}}
-      </style>
+*{{box-sizing:border-box}}
+:root{{
+ --bg:#f4f7fc;--surface:#fff;--ink:#17233d;--muted:#71809a;
+ --blue:#315efb;--blue-dark:#244bd1;--line:#e6ebf3;
+ --soft-blue:#edf3ff;--shadow:0 5px 22px rgba(25,45,85,.055)
+}}
+body{{margin:0;background:var(--bg);color:var(--ink);
+ font:15px Inter,Arial,sans-serif;line-height:1.55}}
+header{{background:#fff;color:var(--ink);padding:18px 30px;
+ border-bottom:1px solid var(--line);box-shadow:0 2px 10px rgba(20,40,80,.035)}}
+header strong{{font-size:20px;font-weight:750;letter-spacing:-.4px}}
+header a{{color:var(--blue);text-decoration:none;float:right;font-weight:600}}
+header a:hover{{text-decoration:underline}}
+main{{max-width:1160px;margin:34px auto;padding:0 22px}}
+h1{{font-size:28px;line-height:1.25;letter-spacing:-.7px;margin:0 0 8px}}
+h2{{font-size:18px;letter-spacing:-.2px;margin:0 0 16px}}
+p{{margin:8px 0}}
+.muted{{color:var(--muted)}}
+.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}}
+.card{{background:var(--surface);border:1px solid var(--line);
+ border-radius:14px;padding:24px;margin:20px 0;box-shadow:var(--shadow)}}
+textarea,input[type=email],input[type=file]{{
+ width:100%;padding:12px 14px;border:1px solid #d6deea;
+ border-radius:9px;margin:8px 0 15px;font:inherit;color:var(--ink);
+ background:#fff;transition:border-color .15s,box-shadow .15s
+}}
+textarea{{min-height:140px;resize:vertical}}
+textarea:focus,input:focus{{outline:none;border-color:var(--blue);
+ box-shadow:0 0 0 3px rgba(49,94,251,.12)}}
+button{{background:var(--blue);color:white;border:0;border-radius:9px;
+ padding:11px 18px;font:inherit;font-weight:650;cursor:pointer;
+ transition:background .15s,transform .15s}}
+button:hover{{background:var(--blue-dark)}}
+button:active{{transform:translateY(1px)}}
+.notice{{background:var(--soft-blue);border:1px solid #d8e4ff;
+ padding:13px 15px;border-radius:10px;color:#294d83;margin:16px 0}}
+.stats{{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}}
+.stat{{padding:12px 16px;border:1px solid var(--line);
+ border-radius:10px;background:#f8faff}}
+.valid{{color:#087443}}.invalid{{color:#bd3030}}
+.unknown{{color:#946200}}.duplicate{{color:#6251a5}}
+table{{width:100%;border-collapse:collapse;margin-top:14px;background:#fff}}
+th,td{{padding:12px 13px;text-align:left;border-bottom:1px solid var(--line);
+ overflow-wrap:anywhere}}
+th{{background:#f7f9fd;color:#52627c;font-size:13px;font-weight:700}}
+.export{{display:inline-block;margin:8px 8px 0 0}}
+@media(max-width:700px){{
+ header{{padding:16px 18px}}
+ header a{{float:none;display:block;margin-top:8px}}
+ main{{margin:24px auto;padding:0 15px}}
+ h1{{font-size:24px}}
+ .grid{{grid-template-columns:1fr}}
+ .card{{padding:18px}}
+ table{{display:block;overflow-x:auto;white-space:nowrap}}
+}}
+</style>
     </head>
     <body>
       <header><strong>PhishGuard Pro</strong> — Email Validator
@@ -141,7 +175,7 @@ def email_validator_home(admin=Depends(verify_admin_session)):
 
 
 @router.post("/check", response_class=HTMLResponse)
-def single_check(email: str = Form(...), admin=Depends(verify_admin_session)):
+def single_check(email: str = Form(...), admin=Depends(verify_admin_session), csrf=Depends(verify_admin_origin)):
     result = check_email(email)
     status_class = result["status"].lower()
     content = f"""
@@ -160,6 +194,7 @@ async def bulk_check(
     emails: str = Form(""),
     upload: UploadFile | None = File(None),
     admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
 ):
     values = [emails] if emails.strip() else []
 
@@ -241,6 +276,7 @@ def export_csv(
     category: str = Form(...),
     addresses: str = Form(...),
     admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
 ):
     if category not in {"Valid", "Invalid", "Unknown", "Duplicate"}:
         raise HTTPException(status_code=400, detail="Invalid export category.")

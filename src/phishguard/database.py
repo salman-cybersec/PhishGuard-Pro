@@ -9,7 +9,7 @@ from phishguard.config import (
 
 DATABASE_PATH = DATA_DIR / "phishguard.db"
 DATABASE_TIMEOUT = 10
-DATABASE_VERSION = 5
+DATABASE_VERSION = 7
 
 
 @contextmanager
@@ -154,6 +154,62 @@ def initialize_database():
             CREATE INDEX IF NOT EXISTS idx_events_campaign_created
             ON events(campaign_id, created_at);
 
+            CREATE TABLE IF NOT EXISTS generated_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL
+                    CHECK(length(name) BETWEEN 1 AND 100),
+                tracking_id TEXT NOT NULL UNIQUE
+                    CHECK(length(tracking_id) BETWEEN 24 AND 100),
+                destination_url TEXT NOT NULL
+                    CHECK(length(destination_url) BETWEEN 1 AND 2048),
+                service_slug TEXT
+                    CHECK(service_slug IS NULL OR length(service_slug) BETWEEN 1 AND 32),
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active', 'paused')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS generated_link_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generated_link_id INTEGER NOT NULL,
+                source TEXT NOT NULL
+                    CHECK(source IN ('direct', 'qr')),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                consent_ip INTEGER NOT NULL DEFAULT 0
+                    CHECK(consent_ip IN (0,1)),
+                ip_address TEXT
+                    CHECK(ip_address IS NULL OR length(ip_address) <= 45),
+                country_code TEXT
+                    CHECK(country_code IS NULL OR length(country_code) = 2),
+                consent_device INTEGER NOT NULL DEFAULT 0
+                    CHECK(consent_device IN (0,1)),
+                user_agent TEXT
+                    CHECK(user_agent IS NULL OR length(user_agent) <= 500),
+                browser_name TEXT,
+                os_name TEXT,
+                device_type TEXT
+                    CHECK(device_type IS NULL OR device_type IN (
+                        'desktop', 'mobile', 'tablet', 'unknown'
+                    )),
+                FOREIGN KEY(generated_link_id)
+                    REFERENCES generated_links(id) ON DELETE CASCADE,
+                CHECK(consent_ip = 1 OR (
+                    ip_address IS NULL AND country_code IS NULL
+                )),
+                CHECK(consent_device = 1 OR (
+                    user_agent IS NULL
+                    AND browser_name IS NULL
+                    AND os_name IS NULL
+                    AND device_type IS NULL
+                ))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_generated_links_tracking
+            ON generated_links(tracking_id);
+
+            CREATE INDEX IF NOT EXISTS idx_generated_link_events_link_created
+            ON generated_link_events(generated_link_id, created_at);
+
             CREATE TABLE IF NOT EXISTS security_scans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 target_url TEXT NOT NULL CHECK(length(target_url) <= 2048),
@@ -196,13 +252,20 @@ def initialize_database():
             "TEXT",
         )
 
+        _add_column_if_missing(
+            connection,
+            "generated_links",
+            "service_slug",
+            "TEXT CHECK(service_slug IS NULL OR length(service_slug) BETWEEN 1 AND 32)",
+        )
+
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_participant
             ON events(participant_id)
         """)
 
         connection.execute(
-            "PRAGMA user_version=5"
+            "PRAGMA user_version=7"
         )
 
 

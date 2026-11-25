@@ -74,7 +74,10 @@ app = FastAPI(
 
 app.include_router(training_router)
 app.include_router(training_page_router)
+from phishguard.generated_link_routes import router as generated_link_router
+
 app.include_router(training_activity_router)
+app.include_router(generated_link_router)
 app.include_router(admin_dashboard_router)
 
 app.add_middleware(
@@ -106,6 +109,12 @@ async def security_headers_middleware(request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
 
     return response
 

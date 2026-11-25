@@ -12,7 +12,10 @@ from phishguard.config import APP_HOST, APP_PORT
 from phishguard.server import app
 
 from phishguard.banner import show_banner, show_service_catalog
-from phishguard.database import initialize_database
+from phishguard.database import initialize_database, get_connection
+from phishguard.link_generator import create_generated_link, create_generated_links, get_generated_link_stats, set_generated_link_status, get_generated_link_history, get_generated_link_analytics
+from phishguard.qr_generator import generate_qr_code
+from phishguard.config import LOCAL_PREVIEW_BASE_URL
 from phishguard.campaigns import create_campaign, list_campaigns
 from phishguard.campaign_controls import update_campaign_status
 from phishguard.analytics import get_campaign_analytics
@@ -39,6 +42,7 @@ def show_menu():
             "[bold cyan]4.[/bold cyan] Generate Reports\n"
             "[bold cyan]5.[/bold cyan] Project Information\n"
             "[bold cyan]6.[/bold cyan] Website Import & Preview\n"
+            "[bold cyan]7.[/bold cyan] Link Generator\n"
             "[bold red]0.[/bold red] Exit",
             title="[bold white]MAIN MENU[/bold white]",
             border_style="bright_blue",
@@ -489,6 +493,147 @@ def website_import_menu():
             console.print("[red]Invalid option.[/red]")
 
 
+
+def link_generator_menu():
+    while True:
+        console.print(Panel(
+            "[bold cyan]1.[/bold cyan] Create Tracking Link\n"
+            "[bold cyan]2.[/bold cyan] List Generated Links\n"
+            "[bold cyan]3.[/bold cyan] View Link Statistics\n"
+            "[bold cyan]4.[/bold cyan] Pause / Resume Link\n"
+            "[bold cyan]5.[/bold cyan] View Link History\n"
+            "[bold cyan]6.[/bold cyan] View Date-wise Analytics\n"
+            "[bold red]0.[/bold red] Back",
+            title="[bold white]LINK GENERATOR[/bold white]",
+            border_style="bright_blue",
+        ))
+        choice = Prompt.ask("Select an option")
+
+        try:
+            if choice == "0":
+                return
+            elif choice == "1":
+                name = Prompt.ask("Link name")
+                destination = Prompt.ask("Authorized HTTPS destination")
+                count = int(Prompt.ask("Number of links (1-100)", default="1"))
+                links = (
+                    [create_generated_link(name, destination)]
+                    if count == 1
+                    else create_generated_links(name, destination, count)
+                )
+                make_qr = Prompt.ask(
+                    "Generate QR codes?", choices=["y", "n"], default="n"
+                ) == "y"
+                for link in links:
+                    url = LOCAL_PREVIEW_BASE_URL.rstrip("/") + "/r/" + link["tracking_id"]
+                    console.print(f"[green]Created:[/green] {url}")
+                    if make_qr:
+                        path = generate_qr_code(url, link["tracking_id"])
+                        console.print(f"[green]QR saved:[/green] {path}")
+            elif choice == "2":
+                with get_connection() as connection:
+                    links = connection.execute(
+                        "SELECT name, tracking_id, status, created_at "
+                        "FROM generated_links ORDER BY id DESC LIMIT 200"
+                    ).fetchall()
+                table = Table(title="Generated Links")
+                for col in ("Name", "Tracking ID", "Status", "Created"):
+                    table.add_column(col)
+                for link in links:
+                    table.add_row(
+                        str(link["name"]), str(link["tracking_id"]),
+                        str(link["status"]), str(link["created_at"])
+                    )
+                console.print(table)
+            elif choice == "4":
+                tracking_id = Prompt.ask("Tracking ID")
+                action = Prompt.ask(
+                    "Action", choices=["pause", "resume"]
+                )
+                status = "paused" if action == "pause" else "active"
+                link = set_generated_link_status(tracking_id, status)
+                console.print(
+                    f"[green]Link {action}d:[/green] {link['tracking_id']}"
+                )
+            elif choice == "3":
+                stats = get_generated_link_stats(Prompt.ask("Tracking ID"))
+                table = Table(title="Link Statistics")
+                table.add_column("Metric")
+                table.add_column("Count")
+                for key, label in (
+                    ("total_clicks", "Total"),
+                    ("direct_clicks", "Direct"),
+                    ("qr_clicks", "QR"),
+                ):
+                    table.add_row(label, str(stats[key]))
+                console.print(table)
+            elif choice == "5":
+                tracking_id = Prompt.ask("Tracking ID")
+                offset = int(Prompt.ask("Offset", default="0"))
+                history = get_generated_link_history(
+                    tracking_id, limit=50, offset=offset
+                )
+                table = Table(title="Generated Link History")
+                for col in ("Time", "Source", "Consented Details"):
+                    table.add_column(col)
+                for event in history["events"]:
+                    details = []
+                    if event["consent_ip"]:
+                        if event["ip_address"]:
+                            details.append("IP: " + str(event["ip_address"]))
+                        if event["country_code"]:
+                            details.append("Country: " + str(event["country_code"]))
+                    if event["consent_device"]:
+                        for label, key in (
+                            ("Browser", "browser_name"),
+                            ("OS", "os_name"),
+                            ("Device", "device_type"),
+                            ("User-Agent", "user_agent"),
+                        ):
+                            if event[key]:
+                                details.append(label + ": " + str(event[key]))
+                    table.add_row(
+                        str(event["created_at"]),
+                        str(event["source"]),
+                        "\n".join(details) if details else "Not collected",
+                    )
+                console.print(table)
+                console.print(
+                    f"Total events: {history['total_events']} | "
+                    f"Next offset: {offset + 50}"
+                    if offset + 50 < history["total_events"]
+                    else f"Total events: {history['total_events']} | End of history"
+                )
+            elif choice == "6":
+                start_date = Prompt.ask("Start date (YYYY-MM-DD)")
+                end_date = Prompt.ask("End date (YYYY-MM-DD)")
+                report = get_generated_link_analytics(start_date, end_date)
+
+                console.print(
+                    f"Total events: {report['total_events']} | "
+                    f"Direct: {report['direct_events']} | "
+                    f"QR: {report['qr_events']}"
+                )
+
+                table = Table(title="Date-wise Link Analytics")
+                for col in ("Date", "Total", "Direct", "QR"):
+                    table.add_column(col)
+
+                for day in report["daily"]:
+                    table.add_row(
+                        str(day["event_date"]),
+                        str(day["total_events"]),
+                        str(day["direct_events"]),
+                        str(day["qr_events"]),
+                    )
+
+                console.print(table)
+            else:
+                console.print("[red]Invalid option.[/red]")
+        except (ValueError, RuntimeError, OSError, KeyError) as error:
+            console.print(f"[red]Error: {error}[/red]")
+
+
 def start_backend():
     """Run the FastAPI backend in a managed background thread."""
     config = uvicorn.Config(
@@ -551,6 +696,8 @@ def main():
                 console.print(f"[white]Backend: http://{APP_HOST}:{APP_PORT}[/white]")
             elif choice == "6":
                 website_import_menu()
+            elif choice == "7":
+                link_generator_menu()
             elif choice == "3":
                 security_testing_menu()
             elif choice == "4":

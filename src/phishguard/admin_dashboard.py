@@ -1,15 +1,21 @@
 
 from html import escape
+from phishguard.service_workspaces import SERVICE_WORKSPACES, render_service_workspace
 import json
 import datetime as dt
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse as _HTMLResponse, RedirectResponse, Response, FileResponse
 
 from phishguard.database import get_connection
 from phishguard.campaigns import create_campaign
 from phishguard.campaign_controls import update_campaign_status
 from phishguard.link_manager import get_tracking_link
+from phishguard.link_generator import create_generated_link, create_generated_links, resolve_generated_link, set_generated_link_status, get_generated_link_history, get_generated_link_analytics
+from phishguard.qr_generator import generate_qr_code
+from phishguard.config import LOCAL_PREVIEW_BASE_URL, build_preview_url
+from phishguard.website_manager import import_website
+from phishguard.website_authorization import validate_website_authorization
 from phishguard.participant_export import export_participants_csv
 from phishguard.analytics import get_campaign_analytics
 from phishguard.participant_reports import get_participant_report
@@ -20,6 +26,7 @@ from phishguard.auth import (
     create_admin_session,
     verify_admin_session,
     revoke_admin_session,
+    verify_admin_origin,
 )
 
 from phishguard.login_throttle import (
@@ -39,9 +46,260 @@ from phishguard.subdomain_discovery import discover_subdomains
 
 router = APIRouter()
 
+# Shared Modern Enterprise UI for standalone admin pages.
+ADMIN_UI_CSS = """
+:root {
+  color-scheme: light;
+  --pg-bg: #f4f7fc;
+  --pg-surface: #ffffff;
+  --pg-ink: #17233d;
+  --pg-muted: #71809a;
+  --pg-line: #e5ebf4;
+  --pg-blue: #315efb;
+  --pg-blue-dark: #244bd0;
+  --pg-shadow: 0 8px 28px rgba(24, 45, 85, .06);
+}
+* { box-sizing: border-box; }
+html { min-width: 320px; }
+body {
+  background: var(--pg-bg) !important;
+  color: var(--pg-ink) !important;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+               BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+  line-height: 1.55;
+}
+main { max-width: 1180px; }
+h1, h2, h3 { color: var(--pg-ink); letter-spacing: -.025em; }
+h1 { font-size: clamp(25px, 3vw, 32px) !important; font-weight: 750; }
+h2 { font-weight: 700; }
+p { line-height: 1.65; }
+a { color: var(--pg-blue); }
+input:not([type=checkbox]):not([type=radio]),
+select, textarea {
+  max-width: 100%;
+  border: 1px solid #d6dfec !important;
+  border-radius: 9px !important;
+  background: #fff;
+  color: var(--pg-ink);
+  font: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+input:not([type=checkbox]):not([type=radio]):focus,
+select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--pg-blue) !important;
+  box-shadow: 0 0 0 3px rgba(49, 94, 251, .12);
+}
+button, input[type=submit] {
+  border: 0;
+  border-radius: 9px;
+  background: var(--pg-blue);
+  color: white;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background .15s, transform .15s;
+}
+button:hover, input[type=submit]:hover {
+  background: var(--pg-blue-dark);
+}
+button:focus-visible, a:focus-visible {
+  outline: 3px solid rgba(49, 94, 251, .35);
+  outline-offset: 3px;
+}
+table { border-collapse: collapse; }
+th {
+  background: #f5f8fd !important;
+  color: #53627a;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .045em;
+}
+th, td { border-bottom: 1px solid var(--pg-line); }
+tr:hover td { background: #f9fbff; }
+.panel, .card, .tool, .service-card, main > section {
+  border-color: var(--pg-line);
+}
+.pg-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-height: 68px;
+  padding: 12px clamp(16px, 4vw, 42px);
+  background: rgba(255,255,255,.96);
+  border-bottom: 1px solid var(--pg-line);
+  box-shadow: 0 3px 14px rgba(24,45,85,.035);
+  backdrop-filter: blur(12px);
+}
+.pg-brand {
+  color: #17233d;
+  font-size: 17px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pg-nav {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.pg-nav a {
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #596982;
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pg-nav a:hover {
+  background: #edf3ff;
+  color: var(--pg-blue);
+}
+@media (max-width: 720px) {
+  .pg-topbar { align-items: flex-start; flex-direction: column; gap: 8px; padding: 12px 16px; }
+  .pg-nav { width: 100%; padding-bottom: 3px; }
+  body { padding-left: 14px !important; padding-right: 14px !important; }
+  main { width: 100%; }
+  table { min-width: 620px; }
+}
+"""
+
+class HTMLResponse(_HTMLResponse):
+    """Apply shared admin styling without changing route or form behavior."""
+
+    def __init__(
+        self, content="", status_code=200, headers=None,
+        media_type=None, background=None
+    ):
+        if isinstance(content, bytes):
+            html = content.decode("utf-8", errors="replace")
+        else:
+            html = content if isinstance(content, str) else None
+
+        if html and "</head>" in html.lower():
+            # Dashboard already owns its complete sidebar and design system.
+            is_dashboard_shell = 'class="sidebar"' in html or "class='sidebar'" in html
+            if not is_dashboard_shell:
+                head_end = html.lower().find("</head>")
+                html = (
+                    html[:head_end]
+                    + "<style>" + ADMIN_UI_CSS + "</style>"
+                    + html[head_end:]
+                )
+
+                # Keep the login screen focused and free of authenticated navigation.
+                is_login = 'class="login"' in html or "class='login'" in html
+                if not is_login and "<body" in html.lower():
+                    body_open = html.lower().find(">", html.lower().find("<body"))
+                    nav = (
+                        '<header class="pg-topbar">'
+                        '<a class="pg-brand" href="/admin/dashboard">PhishGuard Pro</a>'
+                        '<nav class="pg-nav" aria-label="Admin navigation">'
+                        '<a href="/admin/dashboard">Dashboard</a>'
+                        '<a href="/admin/new-scan">New Scan</a>'
+                        '<a href="/admin/full-scan">Full Scan</a>'
+                        '<a href="/admin/scan-reports">Scan Reports</a>'
+                        '<a href="/admin/security-tools">Security Tools</a>'
+                        '<a href="/admin/phishing-links">Phishing Links</a>'
+                        '<a href="/admin/link-generator">Link Generator</a>'
+                        '<a href="/admin/email-validator">Email Validator</a>'
+                        '<a href="/admin/web-importer">Web Importer</a>'
+                        '</nav></header>'
+                    )
+                    html = html[:body_open + 1] + nav + html[body_open + 1:]
+
+        if html is not None:
+            content = html
+
+        super().__init__(
+            content=content,
+            status_code=status_code,
+            headers=headers,
+            media_type=media_type,
+            background=background,
+        )
 
 
 
+
+
+
+
+def _render_structured_data(value, depth=0):
+    """Render nested scan data as escaped, readable HTML tables."""
+    if depth >= 8:
+        return '<span class="muted">Maximum display nesting reached</span>'
+
+    if isinstance(value, dict):
+        if not value:
+            return '<span class="muted">No data available</span>'
+
+        rows = []
+        for key, item in value.items():
+            label = escape(str(key).replace("_", " ").title())
+
+            if isinstance(item, (dict, list)):
+                rendered = (
+                    '<div class="nested-result">'
+                    f'<strong>{label}</strong>'
+                    f'{_render_structured_data(item, depth + 1)}'
+                    '</div>'
+                )
+            else:
+                rendered = escape(str(item)) if item is not None else "Not available"
+
+            rows.append(f'<tr><th>{label}</th><td>{rendered}</td></tr>')
+
+        return '<div class="table-wrap"><table class="result-data"><tbody>' + ''.join(rows) + '</tbody></table></div>'
+
+    if isinstance(value, list):
+        if not value:
+            return '<span class="muted">No records available</span>'
+
+        if all(isinstance(item, dict) for item in value):
+            keys = list(dict.fromkeys(key for item in value for key in item))
+            headers = ''.join(
+                f'<th>{escape(str(key).replace("_", " ").title())}</th>'
+                for key in keys
+            )
+            rows = []
+
+            for item in value:
+                cells = []
+                for key in keys:
+                    cell = item.get(key, "")
+                    if isinstance(cell, (dict, list)):
+                        rendered = _render_structured_data(cell, depth + 1)
+                    else:
+                        rendered = escape(str(cell)) if cell is not None else "Not available"
+                    cells.append(f'<td>{rendered}</td>')
+                rows.append('<tr>' + ''.join(cells) + '</tr>')
+
+            return (
+                '<div class="table-wrap"><table class="result-data">'
+                f'<thead><tr>{headers}</tr></thead>'
+                f'<tbody>{"".join(rows)}</tbody></table></div>'
+            )
+
+        rows = ''.join(
+            '<tr><td>' + (
+                _render_structured_data(item, depth + 1)
+                if isinstance(item, (dict, list))
+                else escape(str(item)) if item is not None else "Not available"
+            ) + '</td></tr>'
+            for item in value
+        )
+        return '<div class="table-wrap"><table class="result-data"><tbody>' + rows + '</tbody></table></div>'
+
+    return escape(str(value)) if value is not None else "Not available"
 
 def _render_dns_security(result):
     sections = []
@@ -630,6 +888,7 @@ def admin_run_security_scan(
     authorized: str = Form(...),
     scan_mode: str = Form("fast"),
     admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
 ):
     if authorized != "yes":
         raise HTTPException(
@@ -966,7 +1225,11 @@ def admin_login_page():
     )
 
 
-@router.post("/admin/login", response_class=HTMLResponse)
+@router.post(
+    "/admin/login",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_origin)],
+)
 def admin_login(
     request: Request,
     password: str = Form(..., max_length=1024),
@@ -1012,6 +1275,7 @@ def admin_login(
 @router.post("/admin/logout")
 def admin_logout(request: Request):
     verify_admin_session(request)
+    verify_admin_origin(request)
     revoke_admin_session(request)
 
     response = RedirectResponse(
@@ -1034,7 +1298,7 @@ def admin_logout(request: Request):
 
 @router.post(
     "/admin/campaigns",
-    dependencies=[Depends(verify_admin_session)],
+    dependencies=[Depends(verify_admin_session), Depends(verify_admin_origin)],
 )
 def admin_create_campaign(
     request: Request,
@@ -1053,7 +1317,7 @@ def admin_create_campaign(
 
 @router.post(
     "/admin/campaigns/{campaign_id}/status",
-    dependencies=[Depends(verify_admin_session)],
+    dependencies=[Depends(verify_admin_session), Depends(verify_admin_origin)],
 )
 def admin_change_campaign_status(
     campaign_id: int,
@@ -1092,25 +1356,47 @@ def admin_export_participants(campaign_id: int):
 
 
 
+
+_RED_TEAM_SERVICES = (
+    ("facebook", "Facebook"),
+    ("instagram", "Instagram"),
+    ("tiktok", "TikTok"),
+    ("snapchat", "Snapchat"),
+    ("paypal", "PayPal"),
+    ("google", "Google"),
+    ("microsoft", "Microsoft"),
+    ("netflix", "Netflix"),
+    ("linkedin", "LinkedIn"),
+    ("x", "X"),
+    ("amazon", "Amazon"),
+    ("apple", "Apple"),
+    ("discord", "Discord"),
+    ("telegram", "Telegram"),
+    ("steam", "Steam"),
+    ("spotify", "Spotify"),
+    ("yahoo", "Yahoo"),
+    ("reddit", "Reddit"),
+    ("pinterest", "Pinterest"),
+    ("twitch", "Twitch"),
+    ("zoom", "Zoom"),
+    ("dropbox", "Dropbox"),
+    ("github", "GitHub"),
+)
+
+
 @router.get(
     "/admin/phishing-links",
     response_class=HTMLResponse,
     dependencies=[Depends(verify_admin_session)],
 )
 def admin_phishing_links():
-    services = [
-        "Facebook", "Instagram", "TikTok", "Snapchat", "PayPal",
-        "Google", "Microsoft", "Netflix", "LinkedIn", "X",
-        "Amazon", "Apple", "Discord", "Telegram", "Steam",
-        "Spotify", "Yahoo", "Reddit", "Pinterest", "Twitch",
-        "Zoom", "Dropbox", "GitHub",
-    ]
-
     cards = "".join(
-        f'<article class="service-card"><h3>{escape(name)}</h3>'
-        '<p>Authorized lab workspace</p>'
-        '<small>Workflow not yet implemented</small></article>'
-        for name in services
+        f'<article class="service-card">'
+        f'<h3>{escape(name)}</h3>'
+        '<p>Red Team workspace</p>'
+        f'<a class="service-link" href="/admin/phishing-links/{slug}">'
+        'Open service page →</a></article>'
+        for slug, name in _RED_TEAM_SERVICES
     )
 
     page = f"""<!doctype html>
@@ -1124,29 +1410,243 @@ def admin_phishing_links():
 body {{ margin: 0; padding: 32px; background: #f5f7fb;
        color: #17233d; font-family: Arial, sans-serif; }}
 header {{ display: flex; justify-content: space-between;
-          align-items: center; gap: 16px; margin-bottom: 28px; }}
+          align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 28px; }}
 h1 {{ margin: 0 0 8px; font-size: 27px; }}
 .subtitle {{ color: #64748b; }}
 .back {{ color: #2457c5; text-decoration: none; font-weight: 600; }}
 .services {{ display: grid; grid-template-columns:
-             repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }}
+             repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; }}
 .service-card {{ background: white; border: 1px solid #e2e8f0;
                  border-radius: 12px; padding: 20px; }}
 .service-card h3 {{ margin: 0 0 12px; }}
-.service-card p {{ color: #64748b; margin: 0 0 10px; }}
-.service-card small {{ color: #b45309; }}
+.service-card p {{ color: #64748b; margin: 0 0 16px; }}
+.service-link {{ display: inline-block; color: #2457c5;
+                 text-decoration: none; font-weight: 600; }}
+.notice {{ margin: 20px 0; padding: 14px 16px; background: #eff6ff;
+           border: 1px solid #bfdbfe; border-radius: 10px; color: #1e40af; }}
 </style>
 </head>
 <body>
 <header>
 <div><h1>Phishing Links</h1>
-<div class="subtitle">Authorized security-awareness lab services</div></div>
+<div class="subtitle">Authorized Red Team service workspaces</div></div>
+<nav>
+<a class="back" href="/admin/link-generator/analytics">Date-wise Analytics</a>
+&nbsp; | &nbsp;
 <a class="back" href="/admin/dashboard">Back to Dashboard</a>
+</nav>
 </header>
+<div class="notice">Authorized Red Team operations. Use only approved targets and test accounts.</div>
 <div class="services">{cards}</div>
 </body>
 </html>"""
 
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get(
+    "/admin/phishing-links/{service_slug}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_phishing_service(service_slug: str):
+    services = dict(_RED_TEAM_SERVICES)
+    service_name = services.get(service_slug)
+
+    if service_name is None:
+        raise HTTPException(status_code=404, detail="Red Team service not found")
+
+    safe_name = escape(service_name)
+
+    if service_slug == "facebook":
+        options = [
+            {
+                "id": "page_access",
+                "title": "Facebook Page Access Review",
+                "checks": [
+                    "Review administrators and assigned Page roles.",
+                    "Remove outdated or unrecognized access.",
+                    "Confirm that critical actions require authorized approval.",
+                    "Review recent Page management activity.",
+                ],
+            },
+            {
+                "id": "business",
+                "title": "Meta Business Portfolio Audit",
+                "checks": [
+                    "Review people and partner assignments.",
+                    "Check connected business assets.",
+                    "Review administrator privileges.",
+                    "Confirm ownership of connected Pages and ad accounts.",
+                ],
+            },
+            {
+                "id": "recovery",
+                "title": "Account Recovery Readiness",
+                "checks": [
+                    "Confirm recovery email and phone are controlled by the owner.",
+                    "Review available multi-factor authentication methods.",
+                    "Check that recovery methods are current.",
+                    "Document the official account recovery procedure.",
+                ],
+            },
+            {
+                "id": "impersonation",
+                "title": "Impersonation & Brand Protection",
+                "checks": [
+                    "Document suspicious profiles using public information.",
+                    "Compare profile names and public business details.",
+                    "Preserve relevant public URLs as evidence.",
+                    "Use the official reporting process where appropriate.",
+                ],
+            },
+            {
+                "id": "profile",
+                "title": "Public Profile Security Review",
+                "checks": [
+                    "Review publicly visible profile information.",
+                    "Check audience and post visibility settings.",
+                    "Review public contact and business details.",
+                    "Document unnecessary public exposure.",
+                ],
+            },
+        ]
+
+        page = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Facebook Security Review Workspace</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f3f6fb;color:#18243b;font-family:Inter,Arial,sans-serif}
+header{background:#fff;border-bottom:1px solid #e3eaf4;padding:22px 5%;display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap}
+.brand{font-size:20px;font-weight:750;color:#1877f2}
+a{color:#1877f2;text-decoration:none;font-weight:600}
+main{max-width:1120px;margin:32px auto;padding:0 20px}
+h1{font-size:30px;margin:0 0 8px}
+.muted{color:#687891;line-height:1.6}
+.hero{background:linear-gradient(120deg,#e8f1ff,#f7faff);border:1px solid #d8e6fb;border-radius:16px;padding:25px;margin-bottom:22px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px}
+.card,.panel{background:#fff;border:1px solid #e3eaf4;border-radius:13px;padding:20px}
+.card h3{font-size:17px;margin:0 0 9px}
+.card p{font-size:14px;color:#687891;line-height:1.55;min-height:44px}
+button{background:#1877f2;color:white;border:0;padding:12px 17px;border-radius:8px;font-weight:650;cursor:pointer}
+button:hover{background:#1264d8}
+.panel{margin-top:22px}
+label{display:block;font-weight:600;margin:14px 0 7px}
+select,input{width:100%;padding:12px;border:1px solid #cbd6e5;border-radius:8px;font:inherit;background:#fff}
+.result{margin-top:18px;padding:17px;background:#f5f8fd;border:1px solid #e1e9f4;border-radius:10px;display:none}
+.result li{margin:10px 0;line-height:1.5;color:#40516b}
+.notice{padding:14px;background:#fff8e8;border:1px solid #f2dfb2;border-radius:10px;color:#75551c;line-height:1.6;margin-top:18px}
+@media(max-width:600px){header{padding:18px}main{margin:20px auto;padding:0 14px}h1{font-size:25px}}
+</style>
+</head>
+<body>
+<header>
+<div class="brand">Facebook Security Review</div>
+</header>
+<main>
+<section class="hero">
+<h1>Facebook Red Team Workspace</h1>
+<p class="muted">Service-specific security assessment workspace for Facebook Pages, public profiles and Meta business assets.</p>
+<a href="https://www.facebook.com/security/" target="_blank" rel="noopener noreferrer">Official Facebook Security Center ↗</a>
+</section>
+
+<section class="grid" id="modules"></section>
+
+<section class="panel">
+<h2>Local Assessment Simulator</h2>
+<p class="muted">Select an assessment module. Results are generated in this browser only; no information is submitted or stored.</p>
+<form id="assessment">
+<label for="module">Assessment module</label>
+<select id="module" required></select>
+<label for="asset">Asset reference (optional URL or internal test label)</label>
+<input id="asset" maxlength="200" placeholder="Example: Owned Facebook Page / internal asset reference">
+<p><button type="submit">Run Local Checklist</button></p>
+</form>
+<div class="result" id="result" aria-live="polite"></div>
+</section>
+
+<div class="notice"><strong>Local simulation:</strong> This workspace does not imitate Facebook sign-in, request passwords or verification codes, contact Facebook APIs, or transmit assessment data.</div>
+
+</main>
+<script>
+const modules = __OPTIONS_JSON__;
+const cards = document.getElementById("modules");
+const select = document.getElementById("module");
+
+for (const item of modules) {
+  const option = document.createElement("option");
+  option.value = item.id;
+  option.textContent = item.title;
+  select.appendChild(option);
+
+  const card = document.createElement("article");
+  card.className = "card";
+  const heading = document.createElement("h3");
+  heading.textContent = item.title;
+  const description = document.createElement("p");
+  description.textContent = item.checks.length + " review checkpoints";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Select module";
+  button.addEventListener("click", () => {
+    select.value = item.id;
+    document.getElementById("assessment").scrollIntoView({behavior:"smooth"});
+  });
+  card.append(heading, description, button);
+  cards.appendChild(card);
+}
+
+document.getElementById("assessment").addEventListener("submit", event => {
+  event.preventDefault();
+  const item = modules.find(entry => entry.id === select.value);
+  if (!item) return;
+
+  const result = document.getElementById("result");
+  result.replaceChildren();
+
+  const heading = document.createElement("h3");
+  heading.textContent = item.title + " — Local Checklist";
+  result.appendChild(heading);
+
+  const reference = document.getElementById("asset").value.trim();
+  if (reference) {
+    const label = document.createElement("p");
+    label.textContent = "Asset reference: " + reference;
+    result.appendChild(label);
+  }
+
+  const list = document.createElement("ul");
+  for (const check of item.checks) {
+    const li = document.createElement("li");
+    li.textContent = "Review: " + check;
+    list.appendChild(li);
+  }
+  result.appendChild(list);
+
+  const note = document.createElement("p");
+  note.textContent = "Simulation complete. No network request or data storage occurred.";
+  result.appendChild(note);
+  result.style.display = "block";
+});
+</script>
+</body>
+</html>"""
+
+        page = page.replace("__OPTIONS_JSON__", json.dumps(options))
+        return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+    config = SERVICE_WORKSPACES.get(service_slug)
+    if config is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Service workspace configuration missing",
+        )
+
+    page = render_service_workspace(service_name, config)
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
@@ -1189,6 +1689,7 @@ def admin_run_full_scan(
     url: str = Form(..., max_length=2048),
     authorized: str = Form(...),
     admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
 ):
     if authorized != "yes":
         raise HTTPException(status_code=400, detail="Authorization confirmation is required.")
@@ -1230,11 +1731,14 @@ def admin_run_full_scan(
     checks = []
     for name, data in result.get("checks", {}).items():
         checks.append(
-            "<tr>"
-            f"<td>{escape(name.replace('_', ' ').title())}</td>"
-            f"<td><pre>{escape(json.dumps(data, indent=2, default=str))}</pre></td>"
-            "</tr>"
+            '<section class="check-result">'
+            f'<h3>{escape(name.replace("_", " ").title())}</h3>'
+            f'{_render_structured_data(data)}'
+            '</section>'
         )
+
+    if not checks:
+        checks.append('<p class="muted">No individual check data was returned.</p>')
 
     return HTMLResponse(f"""
     <!doctype html><html><head><meta charset="UTF-8">
@@ -1268,8 +1772,7 @@ def admin_run_full_scan(
     <table><tr><th>Severity</th><th>Finding</th><th>Remediation</th></tr>
     {''.join(rows)}</table>
     <h2>Individual Check Results</h2>
-    <table><tr><th>Check</th><th>Details</th></tr>
-    {''.join(checks)}</table>
+    {''.join(checks)}
     <p><a href="/admin/security-scans/{scan_id}">Open Saved Report</a></p>
     <p><a href="/admin/full-scan">Run Another Scan</a> |
     <a href="/admin/scan-reports">Scan Reports</a> |
@@ -1313,6 +1816,101 @@ def admin_full_scan():
     <p>Results are saved automatically in Scan Reports.</p>
     <p><a href="/admin/new-scan">Open New Scan</a></p>
     <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+
+@router.get(
+    "/admin/web-importer",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_web_importer():
+    return HTMLResponse("""
+    <!doctype html><html lang="en"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PhishGuard Pro - Web Importer</title>
+    <style>
+    body{font-family:Arial;background:#f4f6f9;color:#202938;padding:25px}
+    main{max-width:900px;margin:auto;background:white;padding:30px;border-radius:14px}
+    input{box-sizing:border-box;width:100%;padding:12px;margin:10px 0 18px}
+    button{padding:12px 20px;background:#2458dc;color:white;border:0;border-radius:7px;cursor:pointer}
+    a{color:#2458dc}.note{color:#596579;font-size:14px}
+    </style></head><body><main>
+    <h1>Web Importer</h1>
+    <p>Import an authorized website into a sanitized static preview.</p>
+    <form method="post" action="/admin/web-importer/import">
+      <label for="url"><strong>Authorized HTTPS Website</strong></label>
+      <input id="url" name="url" type="url" maxlength="2048"
+        placeholder="https://example.com" required>
+      <p><label><input type="checkbox" name="authorized" value="yes"
+        required style="width:auto">
+        I confirm I own this website or have explicit permission to import it.</label></p>
+      <button type="submit">Import Website</button>
+    </form>
+    <p class="note">Only domains configured in the server authorization allowlist can be imported.
+    JavaScript is not executed and visitor credentials are not collected.</p>
+    <p><a href="/admin/dashboard">Back to Dashboard</a></p>
+    </main></body></html>
+    """)
+
+
+@router.post("/admin/web-importer/import", response_class=HTMLResponse)
+def admin_import_website(
+    url: str = Form(..., max_length=2048),
+    authorized: str = Form(...),
+    admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
+):
+    if authorized != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail="Authorization confirmation is required.",
+        )
+
+    try:
+        authorization = validate_website_authorization(url)
+        if not authorization.get("authorized"):
+            raise ValueError("Website authorization was not approved.")
+
+        result = import_website(url)
+        preview_url = build_preview_url(result["preview_id"])
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except (RuntimeError, OSError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Website import failed due to a network or storage error.",
+        ) from error
+
+    website_html = escape(str(result.get("website", "")))
+    preview_html = escape(preview_url)
+
+    return HTMLResponse(f"""
+    <!doctype html><html lang="en"><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Web Import Result</title>
+    <style>
+    body{{font-family:Arial;background:#f4f6f9;color:#202938;padding:25px}}
+    main{{max-width:850px;margin:auto;background:white;padding:30px;border-radius:14px}}
+    .result{{padding:15px;background:#f1f5f9;border-radius:9px;margin:12px 0}}
+    a{{color:#2458dc;overflow-wrap:anywhere}}
+    </style></head><body><main>
+    <h1>Website Import Completed</h1>
+    <p><strong>Website:</strong> {website_html}</p>
+    <p><strong>Status:</strong> {escape(str(result.get("status", "completed")))}</p>
+    <div class="result">
+      <p><strong>Preview:</strong> <a href="{preview_html}" target="_blank" rel="noopener noreferrer">{preview_html}</a></p>
+      <p>Preview type: {escape(str(result.get("preview_type", "sanitized_static_html")))}</p>
+      <p>Assets found: {int(result.get("assets_found", 0))}</p>
+      <p>Assets imported: {int(result.get("assets_imported", 0))}</p>
+      <p>Assets skipped: {int(result.get("assets_skipped", 0))}</p>
+      <p>JavaScript executed: No</p>
+      <p>Credentials collected: No</p>
+    </div>
+    <p><a href="/admin/web-importer">Import another website</a> |
+    <a href="/admin/dashboard">Dashboard</a></p>
     </main></body></html>
     """)
 
@@ -1434,6 +2032,7 @@ def admin_run_security_tool(
     tool: str = Form(...),
     authorized: str = Form(...),
     admin=Depends(verify_admin_session),
+    csrf=Depends(verify_admin_origin),
 ):
     if authorized != "yes":
         raise HTTPException(status_code=400, detail="Authorization confirmation is required.")
@@ -1983,20 +2582,7 @@ def admin_dashboard(request: Request, message: str = "", period: str = "7d"):
     )
 
 
-    service_items = [
-        ("facebook", "Facebook"), ("instagram", "Instagram"),
-        ("tiktok", "TikTok"), ("snapchat", "Snapchat"),
-        ("paypal", "PayPal"), ("google", "Google"),
-        ("microsoft", "Microsoft"), ("netflix", "Netflix"),
-        ("linkedin", "LinkedIn"), ("x", "X"),
-        ("amazon", "Amazon"), ("apple", "Apple"),
-        ("discord", "Discord"), ("telegram", "Telegram"),
-        ("steam", "Steam"), ("spotify", "Spotify"),
-        ("yahoo", "Yahoo"), ("reddit", "Reddit"),
-        ("pinterest", "Pinterest"), ("twitch", "Twitch"),
-        ("zoom", "Zoom"), ("dropbox", "Dropbox"),
-        ("github", "GitHub"),
-    ]
+    service_items = _RED_TEAM_SERVICES
 
     scores = [int(scan["security_score"] or 0) for scan in security_scans]
     average_score = round(sum(scores) / len(scores)) if scores else 0
@@ -2043,9 +2629,9 @@ def admin_dashboard(request: Request, message: str = "", period: str = "7d"):
         service_cards.append(
             f'<details class="service-card" id="service-{service_id}">'
             f'<summary><span class="service-icon">{escape(service_name[:1])}</span>'
-            f'<span>{escape(service_name)}</span><small>Lab workflow pending</small></summary>'
-            '<div class="service-info"><p>Dedicated authorized lab workspace.</p>'
-            '<p class="muted">This service-specific workflow is not implemented yet. No real-brand login clone or credential collection is provided.</p></div></details>'
+            f'<span>{escape(service_name)}</span><small>Open Red Team workspace</small></summary>'
+            '<div class="service-info"><p>Dedicated service-specific Red Team workspace.</p>'
+            f'<p class="muted"><a href="/admin/phishing-links/{escape(str(service_id))}">Open workspace</a></p></div></details>'
         )
 
     scan_section = f"""
@@ -2199,13 +2785,15 @@ def admin_dashboard(request: Request, message: str = "", period: str = "7d"):
         <div class="brand"><div class="brand-mark">P</div><div><strong>PhishGuard Pro</strong><small>SECURITY OPERATIONS</small></div></div>
         <div class="nav-label">WORKSPACE</div>
         <nav>
-          <a class="nav-link active" href="/admin/dashboard"><span class="nav-icon">◈</span>Dashboard</a>
-          <a class="nav-link" href="/admin/new-scan"><span class="nav-icon">⌕</span>New Scan</a>
-          <a class="nav-link" href="/admin/full-scan"><span class="nav-icon">▦</span>Full Scan</a>
-          <a class="nav-link" href="/admin/phishing-links"><span class="nav-icon">◇</span>Phishing Links</a>
-          <a class="nav-link" href="/admin/scan-reports"><span class="nav-icon">▤</span>Scan Reports</a>
-          <a class="nav-link" href="/admin/security-tools"><span class="nav-icon">⚙</span>Security Tools</a>
-  <a class="nav-link" href="/admin/email-validator"><span class="nav-icon">✉</span>Email Validator</a>
+          <a class="nav-link active" href="/admin/dashboard"><span class="nav-icon">◈</span><span>Dashboard</span></a>
+          <a class="nav-link" href="/admin/new-scan"><span class="nav-icon">⌕</span><span>New Scan</span></a>
+          <a class="nav-link" href="/admin/full-scan"><span class="nav-icon">▦</span><span>Full Scan</span></a>
+          <a class="nav-link" href="/admin/phishing-links"><span class="nav-icon">◇</span><span>Phishing Links</span></a>
+          <a class="nav-link" href="/admin/link-generator"><span class="nav-icon">↗</span><span>Link Generator</span></a>
+          <a class="nav-link" href="/admin/web-importer"><span class="nav-icon">▧</span><span>Web Importer</span></a>
+          <a class="nav-link" href="/admin/security-tools"><span class="nav-icon">⚙</span><span>Security Tools</span></a>
+          <a class="nav-link" href="/admin/email-validator"><span class="nav-icon">✉</span><span>Email Validator</span></a>
+          <a class="nav-link" href="/admin/scan-reports"><span class="nav-icon">▤</span><span>Scan Reports</span></a>
         </nav>
         <div class="sidebar-note">Authorized security testing only. Scan systems you own or have explicit permission to assess.</div>
       </aside>
@@ -2254,3 +2842,424 @@ def admin_dashboard(request: Request, message: str = "", period: str = "7d"):
     )
 from phishguard.email_validation import router as email_validator_router
 router.include_router(email_validator_router)
+
+
+@router.get(
+    "/admin/link-generator",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_link_generator():
+    with get_connection() as connection:
+        links = connection.execute(
+            """
+            SELECT
+                l.id,
+                l.name,
+                l.tracking_id,
+                l.destination_url,
+                l.status,
+                l.created_at,
+                COUNT(e.id) AS total_clicks,
+                SUM(CASE WHEN e.source = 'direct' THEN 1 ELSE 0 END)
+                    AS direct_clicks,
+                SUM(CASE WHEN e.source = 'qr' THEN 1 ELSE 0 END)
+                    AS qr_clicks
+            FROM generated_links AS l
+            LEFT JOIN generated_link_events AS e
+                ON e.generated_link_id = l.id
+            GROUP BY l.id
+            ORDER BY l.id DESC
+            LIMIT 200
+            """
+        ).fetchall()
+
+        summary = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM generated_links) AS total_links,
+                (SELECT COUNT(*) FROM generated_links WHERE status = 'active') AS active_links,
+                (SELECT COUNT(*) FROM generated_links WHERE status = 'paused') AS paused_links,
+                (SELECT COUNT(*) FROM generated_link_events) AS total_events,
+                (SELECT COUNT(*) FROM generated_link_events WHERE source = 'direct') AS direct_events,
+                (SELECT COUNT(*) FROM generated_link_events WHERE source = 'qr') AS qr_events
+            """
+        ).fetchone()
+
+    rows = []
+    for link in links:
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(link['name']))}</td>"
+            f"<td><code>{escape(str(link['tracking_id']))}</code></td>"
+            f"<td>{escape(str(link['status']))}</td>"
+            f"<td><form method='post' action='/admin/link-generator/{escape(str(link['tracking_id']))}/status'>"
+            f"<input type='hidden' name='status' value='{'paused' if link['status'] == 'active' else 'active'}'>"
+            f"<button type='submit'>{'Pause' if link['status'] == 'active' else 'Resume'}</button></form></td>"
+            f"<td>{link['total_clicks'] or 0}</td>"
+            f"<td>{link['direct_clicks'] or 0}</td>"
+            f"<td>{link['qr_clicks'] or 0}</td>"
+            f"<td><a href='/admin/link-generator/{escape(str(link['tracking_id']))}/qr'>Download QR</a></td>"
+            f"<td><a href='/admin/link-generator/{escape(str(link['tracking_id']))}/history'>View History</a></td>"
+            f"<td><code>{escape(LOCAL_PREVIEW_BASE_URL.rstrip('/') + '/r/' + str(link['tracking_id']))}</code></td>"
+            f"<td>{escape(str(link['created_at']))}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        rows.append(
+            '<tr><td colspan="11">No generated links yet.</td></tr>'
+        )
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link Generator | PhishGuard Pro</title>
+<style>
+* {{ box-sizing: border-box; }}
+body {{ margin: 0; padding: 32px; background: #f5f7fb;
+       color: #17233d; font-family: Arial, sans-serif; }}
+main {{ max-width: 1150px; margin: auto; }}
+header {{ display: flex; justify-content: space-between;
+          align-items: center; gap: 16px; margin-bottom: 28px; }}
+h1 {{ margin: 0 0 8px; font-size: 27px; }}
+.subtitle, .muted {{ color: #64748b; }}
+.back {{ color: #2457c5; text-decoration: none; font-weight: 600; }}
+.panel {{ background: white; border: 1px solid #e2e8f0;
+          border-radius: 12px; padding: 22px; margin-bottom: 22px; }}
+.summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 22px; }}
+.summary-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; }}
+.summary-card strong {{ display: block; font-size: 25px; margin-top: 8px; }}
+input[type=text], input[type=url] {{
+    width: 100%; padding: 12px; margin: 8px 0 16px;
+    border: 1px solid #cbd5e1; border-radius: 7px;
+}}
+button {{ background: #2457c5; color: white; border: 0;
+          padding: 12px 20px; border-radius: 7px; cursor: pointer; }}
+table {{ width: 100%; border-collapse: collapse; background: white; }}
+th, td {{ text-align: left; padding: 12px; border-bottom: 1px solid #e2e8f0; }}
+th {{ background: #f8fafc; }}
+.table-wrap {{ overflow-x: auto; }}
+code {{ overflow-wrap: anywhere; }}
+.notice {{ color: #475569; background: #f1f5f9;
+           padding: 12px; border-radius: 8px; }}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><h1>Link Generator</h1>
+<div class="subtitle">Create and monitor links for authorized destinations.</div></div>
+<a class="back" href="/admin/dashboard">Back to Dashboard</a>
+</header>
+
+<section class="summary-grid">
+<div class="summary-card">Total Links<strong>{summary['total_links'] or 0}</strong></div>
+<div class="summary-card">Active Links<strong>{summary['active_links'] or 0}</strong></div>
+<div class="summary-card">Paused Links<strong>{summary['paused_links'] or 0}</strong></div>
+<div class="summary-card">Total Events<strong>{summary['total_events'] or 0}</strong></div>
+<div class="summary-card">Direct Events<strong>{summary['direct_events'] or 0}</strong></div>
+<div class="summary-card">QR Events<strong>{summary['qr_events'] or 0}</strong></div>
+</section>
+
+<section class="panel">
+<h2>Create a tracking link</h2>
+<p class="muted">Only use websites you own or are explicitly authorized to track.</p>
+<form method="post" action="/admin/link-generator/create">
+<label for="name">Link name</label>
+<input id="name" name="name" type="text" maxlength="100"
+       placeholder="Campaign or project name" required>
+<label for="destination_url">Authorized HTTPS destination</label>
+<input id="destination_url" name="destination_url" type="url"
+       maxlength="2048" placeholder="https://your-authorized-domain.example/page"
+       required>
+<label for="service_slug">Security review workspace (optional)</label>
+<select id="service_slug" name="service_slug">
+<option value="">General tracking link</option>
+<option value="facebook">Facebook</option>
+<option value="instagram">Instagram</option>
+<option value="tiktok">TikTok</option>
+<option value="snapchat">Snapchat</option>
+<option value="paypal">PayPal</option>
+<option value="google">Google</option>
+<option value="microsoft">Microsoft</option>
+<option value="netflix">Netflix</option>
+<option value="linkedin">LinkedIn</option>
+<option value="x">X</option>
+<option value="amazon">Amazon</option>
+<option value="apple">Apple</option>
+<option value="discord">Discord</option>
+<option value="telegram">Telegram</option>
+<option value="steam">Steam</option>
+<option value="spotify">Spotify</option>
+<option value="yahoo">Yahoo</option>
+<option value="reddit">Reddit</option>
+<option value="pinterest">Pinterest</option>
+<option value="twitch">Twitch</option>
+<option value="zoom">Zoom</option>
+<option value="dropbox">Dropbox</option>
+<option value="github">GitHub</option>
+</select>
+<label for="count">Number of links (1–100)</label>
+<input id="count" name="count" type="number" min="1" max="100"
+       value="1" required>
+<label><input type="checkbox" name="authorized" value="yes" required>
+I confirm I own this destination or have permission to use it.</label>
+<p><button type="submit">Create tracking link</button></p>
+</form>
+</section>
+
+<section class="panel">
+<h2>Generated links</h2>
+<p class="muted">Showing up to 200 newest links. Click totals are separated by source.</p>
+<div class="table-wrap">
+<table>
+<thead><tr>
+<th>Name</th><th>Tracking ID</th><th>Status</th><th>Action</th>
+<th>Total clicks</th><th>Direct</th><th>QR</th><th>QR Code</th><th>History</th><th>Tracking URL</th><th>Created</th>
+</tr></thead>
+<tbody>{''.join(rows)}</tbody>
+</table>
+</div>
+</section>
+<p class="notice">IP address and device information are not collected unless the visitor explicitly consents. Tracking URLs and QR codes are available for authorized destinations.</p>
+</main>
+</body>
+</html>"""
+
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.get(
+    "/admin/link-generator/analytics",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_generated_link_analytics(
+    start_date: str = "",
+    end_date: str = "",
+):
+    today = dt.date.today().isoformat()
+    start_date = start_date or today
+    end_date = end_date or today
+
+    try:
+        report = get_generated_link_analytics(start_date, end_date)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    rows = "".join(
+        "<tr>"
+        f"<td>{escape(str(day['event_date']))}</td>"
+        f"<td>{day['total_events']}</td>"
+        f"<td>{day['direct_events']}</td>"
+        f"<td>{day['qr_events']}</td>"
+        "</tr>"
+        for day in report["daily"]
+    ) or '<tr><td colspan="4">No events in this date range.</td></tr>'
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link Analytics | PhishGuard Pro</title>
+<style>
+body {{ margin:0; padding:30px; background:#f5f7fb; color:#17233d; font-family:Arial,sans-serif; }}
+main {{ max-width:1000px; margin:auto; }}
+.panel {{ background:white; border:1px solid #e2e8f0; border-radius:10px; padding:20px; margin:18px 0; }}
+.cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }}
+.card {{ background:white; border:1px solid #e2e8f0; border-radius:9px; padding:18px; }}
+.card strong {{ display:block; font-size:25px; margin-top:8px; }}
+input,button {{ padding:10px; margin:6px; }}
+button {{ background:#2457c5; color:white; border:0; border-radius:6px; cursor:pointer; }}
+table {{ width:100%; border-collapse:collapse; }}
+th,td {{ padding:12px; text-align:left; border-bottom:1px solid #e2e8f0; }}
+th {{ background:#f8fafc; }}
+</style>
+</head>
+<body><main>
+<h1>Generated Link Analytics</h1>
+<p><a href="/admin/link-generator">Back to Link Generator</a></p>
+<section class="panel">
+<form method="get">
+<label>From <input type="date" name="start_date" value="{escape(start_date)}" required></label>
+<label>To <input type="date" name="end_date" value="{escape(end_date)}" required></label>
+<button type="submit">Apply Date Range</button>
+</form>
+</section>
+<section class="cards">
+<div class="card">Total Events<strong>{report['total_events']}</strong></div>
+<div class="card">Direct Events<strong>{report['direct_events']}</strong></div>
+<div class="card">QR Events<strong>{report['qr_events']}</strong></div>
+</section>
+<section class="panel">
+<h2>Daily Breakdown</h2>
+<table><thead><tr><th>Date</th><th>Total</th><th>Direct</th><th>QR</th></tr></thead>
+<tbody>{rows}</tbody></table>
+</section>
+</main></body></html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.post(
+    "/admin/link-generator/create",
+    dependencies=[Depends(verify_admin_session), Depends(verify_admin_origin)],
+)
+def admin_create_generated_link(
+    name: str = Form(..., max_length=100),
+    destination_url: str = Form(..., max_length=2048),
+    authorized: str = Form(...),
+    count: int = Form(1),
+    service_slug: str = Form(""),
+):
+    if authorized != "yes":
+        raise HTTPException(
+            status_code=400,
+            detail="Authorization confirmation is required.",
+        )
+
+    try:
+        selected_service = service_slug.strip() or None
+        if count == 1:
+            if selected_service is None:
+                create_generated_link(name, destination_url)
+            else:
+                create_generated_link(name, destination_url, selected_service)
+        else:
+            if selected_service is None:
+                create_generated_links(name, destination_url, count)
+            else:
+                create_generated_links(name, destination_url, count, selected_service)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    return RedirectResponse(
+        url="/admin/link-generator",
+        status_code=303,
+    )
+
+
+
+@router.get(
+    "/admin/link-generator/{tracking_id}/history",
+    response_class=HTMLResponse,
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_generated_link_history(tracking_id: str, offset: int = 0):
+    try:
+        history = get_generated_link_history(tracking_id, limit=50, offset=offset)
+    except ValueError as error:
+        status_code = 404 if "not found" in str(error).lower() else 400
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
+
+    rows = []
+    for event in history["events"]:
+        details = []
+        if event["consent_ip"]:
+            if event["ip_address"]:
+                details.append("IP: " + escape(str(event["ip_address"])))
+            if event["country_code"]:
+                details.append("Country: " + escape(str(event["country_code"])))
+        if event["consent_device"]:
+            for label, key in (
+                ("Browser", "browser_name"),
+                ("OS", "os_name"),
+                ("Device", "device_type"),
+                ("User-Agent", "user_agent"),
+            ):
+                if event[key]:
+                    details.append(label + ": " + escape(str(event[key])))
+
+        rows.append(
+            "<tr>"
+            f"<td>{escape(str(event['created_at']))}</td>"
+            f"<td>{escape(str(event['source']))}</td>"
+            f"<td>{'<br>'.join(details) if details else 'Not collected'}</td>"
+            "</tr>"
+        )
+
+    if not rows:
+        rows.append('<tr><td colspan="3">No events recorded.</td></tr>')
+
+    total = history["total_events"]
+    previous = (
+        f'<a href="?offset={max(0, offset - 50)}">Previous</a>'
+        if offset > 0 else ""
+    )
+    next_page = (
+        f'<a href="?offset={offset + 50}">Next</a>'
+        if offset + 50 < total else ""
+    )
+
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link History | PhishGuard Pro</title>
+<style>
+body {{ margin:0; padding:32px; background:#f5f7fb; color:#17233d;
+font-family:Arial,sans-serif; }}
+main {{ max-width:1100px; margin:auto; }}
+.panel {{ background:white; padding:22px; border:1px solid #e2e8f0;
+border-radius:12px; overflow-x:auto; }}
+table {{ width:100%; border-collapse:collapse; }}
+th,td {{ text-align:left; padding:12px; border-bottom:1px solid #e2e8f0;
+vertical-align:top; overflow-wrap:anywhere; }}
+th {{ background:#f8fafc; }}
+a {{ color:#2457c5; }}
+nav {{ display:flex; gap:20px; margin-top:20px; }}
+</style></head><body><main>
+<h1>Generated Link History</h1>
+<p>Tracking ID: <code>{escape(tracking_id)}</code></p>
+<section class="panel">
+<p>Total events: {total}</p>
+<table><thead><tr><th>Time</th><th>Source</th><th>Consented details</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table>
+<nav>{previous}{next_page}</nav>
+</section>
+<p><a href="/admin/link-generator">Back to Link Generator</a></p>
+</main></body></html>"""
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
+@router.post(
+    "/admin/link-generator/{tracking_id}/status",
+    dependencies=[Depends(verify_admin_session), Depends(verify_admin_origin)],
+)
+def admin_update_generated_link_status(
+    tracking_id: str,
+    status: str = Form(...),
+):
+    try:
+        set_generated_link_status(tracking_id, status)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    return RedirectResponse(
+        url="/admin/link-generator",
+        status_code=303,
+    )
+
+
+@router.get(
+    "/admin/link-generator/{tracking_id}/qr",
+    dependencies=[Depends(verify_admin_session)],
+)
+def admin_download_generated_link_qr(tracking_id: str):
+    try:
+        link = resolve_generated_link(tracking_id)
+        tracking_url = (
+            LOCAL_PREVIEW_BASE_URL.rstrip("/") + "/r/" + tracking_id
+        )
+        qr_path = generate_qr_code(tracking_url, tracking_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail="Link unavailable.") from error
+
+    return FileResponse(
+        qr_path,
+        media_type="image/png",
+        filename=f"{tracking_id}.png",
+        headers={"Cache-Control": "no-store"},
+    )

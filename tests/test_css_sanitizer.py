@@ -1,7 +1,7 @@
 
 import pytest
 
-from phishguard.css_sanitizer import sanitize_css
+from phishguard.css_sanitizer import sanitize_css, scope_css
 
 
 def test_safe_css_is_preserved():
@@ -125,3 +125,37 @@ def test_at_font_face_is_removed():
     assert "@font-face" not in result
     assert "evil.example" not in result
     assert "color: black" in result
+
+
+
+def test_scope_css_prefixes_global_selectors():
+    result = scope_css(
+        "body { color: red; } html { color: blue; }"
+    )
+    assert ".phishguard-preview { color: red;" in result
+    assert ".phishguard-preview { color: blue;" in result
+
+
+def test_scope_css_keeps_valid_scoped_selector():
+    result = scope_css(
+        ".phishguard-preview .title { color: red; }"
+    )
+    assert ".phishguard-preview .title" in result
+
+
+def test_scope_css_does_not_accept_scope_name_prefix():
+    result = scope_css(
+        ".phishguard-preview-evil { color: red; }"
+    )
+    assert ".phishguard-preview .phishguard-preview-evil" in result
+    assert not result.startswith(".phishguard-preview-evil {")
+
+
+def test_scope_css_removes_unsafe_at_rules():
+    result = scope_css(
+        "@import url(https://evil.example/x.css); "
+        ".title { color: green; }"
+    )
+    assert "@import" not in result
+    assert "evil.example" not in result
+    assert ".phishguard-preview .title" in result

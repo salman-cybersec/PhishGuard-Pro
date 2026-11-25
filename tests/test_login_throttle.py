@@ -24,7 +24,7 @@ def reset_login_throttle():
 def client():
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app, follow_redirects=False) as test_client:
+    with TestClient(app, follow_redirects=False, headers={"Origin": "http://testserver"}) as test_client:
         yield test_client
 
 

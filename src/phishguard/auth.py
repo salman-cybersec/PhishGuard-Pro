@@ -6,6 +6,8 @@ import hashlib
 import time
 from threading import Lock
 
+from urllib.parse import urlsplit
+
 from fastapi import Header, HTTPException, Request
 
 
@@ -146,3 +148,95 @@ def revoke_admin_session(request: Request) -> None:
 
     with _sessions_lock:
         _sessions.pop(token_hash, None)
+
+
+def verify_admin_origin(request: Request):
+    """Enforce same-origin protection on admin POST requests."""
+    origin = request.headers.get("origin") or None
+    target = urlsplit(str(request.base_url))
+
+    if origin == "null":
+        # Prefer browser Fetch Metadata when available.
+        fetch_metadata_valid = (
+            request.headers.get("sec-fetch-site") == "same-origin"
+            and request.headers.get("sec-fetch-mode") == "navigate"
+            and request.headers.get("sec-fetch-dest") == "document"
+            and bool(request.headers.get("host"))
+            and request.headers.get("host", "").lower() == target.netloc.lower()
+            and target.scheme in ("http", "https")
+            and bool(target.hostname)
+        )
+
+        # Some browsers may send Origin: null on a form navigation.
+        # In that case, accept only a verified same-origin Referer.
+        referer_valid = False
+        referer = request.headers.get("referer")
+
+        if referer:
+            try:
+                source = urlsplit(referer)
+
+                def port(parsed):
+                    return parsed.port if parsed.port is not None else (
+                        443 if parsed.scheme == "https" else 80
+                    )
+
+                referer_valid = (
+                    source.scheme in ("http", "https")
+                    and target.scheme in ("http", "https")
+                    and bool(source.hostname)
+                    and bool(target.hostname)
+                    and source.username is None
+                    and source.password is None
+                    and source.scheme.lower() == target.scheme.lower()
+                    and source.hostname.lower() == target.hostname.lower()
+                    and port(source) == port(target)
+                )
+            except (ValueError, TypeError):
+                referer_valid = False
+
+        valid = fetch_metadata_valid or referer_valid
+    else:
+        if origin is None:
+            origin = request.headers.get("referer")
+
+        if not origin:
+            raise HTTPException(
+                status_code=403,
+                detail="Cross-origin request rejected.",
+            )
+
+        try:
+            source = urlsplit(origin)
+
+            if (
+                source.scheme not in ("http", "https")
+                or target.scheme not in ("http", "https")
+                or not source.hostname
+                or not target.hostname
+                or source.username is not None
+                or source.password is not None
+            ):
+                raise ValueError("Invalid origin")
+
+            if source.path not in ("", "/") and request.headers.get("origin"):
+                raise ValueError("Invalid Origin header")
+
+            def port(parsed):
+                return parsed.port if parsed.port is not None else (
+                    443 if parsed.scheme == "https" else 80
+                )
+
+            valid = (
+                source.scheme.lower() == target.scheme.lower()
+                and source.hostname.lower() == target.hostname.lower()
+                and port(source) == port(target)
+            )
+        except (ValueError, TypeError):
+            valid = False
+
+    if not valid:
+        raise HTTPException(
+            status_code=403,
+            detail="Cross-origin request rejected.",
+        )

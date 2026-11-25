@@ -230,7 +230,14 @@ def scope_css(css, scope=".phishguard-preview"):
 
             if normalized.lower() in {"html", "body", ":root"}:
                 scoped_selectors.append(scope)
-            elif normalized.startswith(scope):
+            elif (
+                normalized == scope
+                or (
+                    normalized.startswith(scope)
+                    and len(normalized) > len(scope)
+                    and normalized[len(scope)] in " .#:[>+~"
+                )
+            ):
                 scoped_selectors.append(normalized)
             else:
                 scoped_selectors.append(

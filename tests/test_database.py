@@ -48,7 +48,7 @@ def test_database_integrity_is_valid(
     assert database.verify_database_integrity() is True
 
 
-def test_database_version_is_five(
+def test_database_version_is_seven(
     monkeypatch,
     tmp_path,
 ):
@@ -56,7 +56,7 @@ def test_database_version_is_five(
 
     database.initialize_database()
 
-    assert database.get_database_version() == 5
+    assert database.get_database_version() == 7
 
 
 def test_initialize_database_adds_missing_columns(
@@ -117,3 +117,26 @@ def test_initialize_database_adds_missing_columns(
 
     assert "consent_activity" in participant_columns
     assert "participant_id" in event_columns
+
+
+def test_initialize_database_creates_generated_link_tables(
+    monkeypatch,
+    tmp_path,
+):
+    configure_test_database(monkeypatch, tmp_path)
+
+    database.initialize_database()
+
+    with database.get_connection() as connection:
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table'
+                """
+            ).fetchall()
+        }
+
+    assert "generated_links" in tables
+    assert "generated_link_events" in tables
